@@ -255,6 +255,14 @@ class PerceptionLayer:
         tilt = payload.get("imu_tilt_deg", 0)
         now = time.time()
 
+        # 直通同步: 电量直接映射到生存度 (viability)
+        # 这是内感的核心——身体状态直接决定稳态，而非仅通过感受间接影响
+        from animat.homeostasis import Vital
+        from animat.config import RedisKeys
+        await self.memory.redis.hset(
+            RedisKeys.STATE_HOMEOSTASIS, Vital.VIABILITY.value, str(battery)
+        )
+
         # 充电检测: 电量正在上升 → RECHARGING 感受
         if battery > self._prev_battery + 0.5:
             delta = battery - self._prev_battery

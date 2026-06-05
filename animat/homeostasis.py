@@ -150,7 +150,7 @@ class HomeostasisEngine:
         - 生存度随时间降低 (电量消耗)
         """
         decay_rate = {
-            Vital.VIABILITY:   0.001 * dt_seconds,   # 缓慢消耗
+            Vital.VIABILITY:   0.0 * dt_seconds,    # 生存度由外部传感器(battery)直通驱动，不自主衰减
             Vital.AFFILIATION: 0.005 * dt_seconds,   # 社交需求增长较快
             Vital.EXPLORATION: 0.008 * dt_seconds,   # 好奇心衰减最快
         }

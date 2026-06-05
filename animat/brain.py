@@ -197,7 +197,10 @@ class AnimatBrain:
             tick_start = time.time()
             self._tick_count += 1
 
-            # 1. 稳态自然衰减
+            # 1. 同步外部传感器直通的稳态值 (如电池→生存度)
+            await self._sync_sensor_driven_vitals()
+
+            # 2. 稳态自然衰减
             dt = BrainConfig.SUBCONSCIOUS_TICK_MS / 1000.0
             await self.homeostasis.decay_vitals(dt)
 
@@ -287,6 +290,23 @@ class AnimatBrain:
         """保存当前状态到Redis"""
         vitals = {v.value: val for v, val in self.homeostasis._vitals.items()}
         await self.memory.save_state(RedisKeys.STATE_HOMEOSTASIS, vitals)
+
+    async def _sync_sensor_driven_vitals(self):
+        """
+        从Redis同步外部传感器直通的稳态值
+        感知层可将传感器数据直接写入Redis(如battery→viability)，
+        此处读取并覆盖内存中的对应值，实现传感器→稳态的直通通路。
+        """
+        from animat.homeostasis import Vital
+        raw = await self.memory.redis.hget(
+            RedisKeys.STATE_HOMEOSTASIS, Vital.VIABILITY.value
+        )
+        if raw is not None:
+            sensor_value = float(raw)
+            # 仅当传感器值与当前值差异较大时才覆盖（避免衰减被反复冲掉）
+            current_value = self.homeostasis._vitals[Vital.VIABILITY]
+            if abs(sensor_value - current_value) > 1.0:
+                self.homeostasis._vitals[Vital.VIABILITY] = sensor_value
 
     async def _restore_state(self):
         """从Redis恢复状态"""

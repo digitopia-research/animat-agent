@@ -36,9 +36,9 @@ class SensorSimulator:
         self._running = False
         self._charging = False          # 是否正在充电
         self._charge_rate = 3.0         # 充电速率: %/秒
-        self.host = os.getenv("MQTT_BROKER_HOST", "localhost"),
-        self.port = os.getenv("MQTT_BROKER_PORT", "1883"),
-        self.alive= os.getenv("MQTT_KEEPALIVE", "60"),
+        self.host = os.getenv("MQTT_BROKER_HOST", "localhost")
+        self.port = int(os.getenv("MQTT_BROKER_PORT", "1883"))
+        self.alive = int(os.getenv("MQTT_KEEPALIVE", "60"))
 
     @property
     def charging(self) -> bool:
@@ -231,7 +231,7 @@ async def interactive_input(sim: SensorSimulator):
     """交互式输入: 模拟人类对Animat说话 + 模拟器控制命令"""
     async with aiomqtt.Client(
         hostname=os.getenv("MQTT_BROKER_HOST", "localhost"),
-        port=os.getenv("MQTT_BROKER_PORT", "1883"),
+        port=int(os.getenv("MQTT_BROKER_PORT", "1883")),
         identifier="animat-human-input",
     ) as client:
         loop = asyncio.get_event_loop()
