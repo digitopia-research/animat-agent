@@ -27,23 +27,31 @@ class NervousSystem:
         host: str = os.getenv("MQTT_BROKER_HOST", "localhost"),
         port: int = int(os.getenv("MQTT_BROKER_PORT", "1883")),
         alive: int = int(os.getenv("MQTT_KEEPALIVE", "60")),
+        transport: str = os.getenv("MQTT_TRANSPORT", "tcp"),
+        websocket_path: str = os.getenv("MQTT_WS_PATH", "/mqtt"),
     ):
         self.client_id = client_id
         self.host = host
         self.port = port
         self.alive = alive
+        self.transport = transport
+        self.websocket_path = websocket_path
         self._client: Optional[aiomqtt.Client] = None
         self._subscribers: dict[str, list[Callable]] = {}
         self._running = False
 
     async def start(self, timeout: float = 10.0):
         """启动神经总线连接"""
-        self._client = aiomqtt.Client(
+        kwargs = dict(
             hostname=self.host,
             port=self.port,
             identifier=self.client_id,
             keepalive=self.alive,
         )
+        if self.transport == "websockets":
+            kwargs["transport"] = "websockets"
+            kwargs["websocket_path"] = self.websocket_path
+        self._client = aiomqtt.Client(**kwargs)
         try:
             await asyncio.wait_for(self._client.__aenter__(), timeout=timeout)
         except asyncio.TimeoutError:
@@ -61,7 +69,7 @@ class NervousSystem:
                 f"MQTT broker connection failed: {self.host}:{self.port} — {e}"
             )
         self._running = True
-        logger.info(f"Nervous system connected: {self.host}:{self.port}")
+        logger.info(f"Nervous system connected: {self.host}:{self.port} (transport={self.transport})")
         asyncio.create_task(self._dispatch_loop())
 
     async def stop(self):

@@ -4,6 +4,8 @@ __pycache__/
 .venv/
 .vscode/
 
+sandbox
+
 # env
 .env
 .env.local

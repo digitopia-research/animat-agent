@@ -19,6 +19,7 @@ import logging
 import time
 
 from animat.config import BrainConfig, Topic, RedisKeys
+from animat.homeostasis import VITAL_CONFIGS
 from animat.nervous import NervousSystem
 from animat.memory import MemoryStore
 from animat.perception import PerceptionLayer
@@ -176,12 +177,16 @@ class AnimatBrain:
         dominant = self.homeostasis.get_dominant_emotion()
         max_drive = self.homeostasis.get_max_drive()
 
+        # 构建实时稳态摘要，让 LLM 能看到真实数值而非凭空想象
+        vitals_summary = self._build_vitals_summary()
+
         logger.info(f"Waking cortex: trigger={trigger}, emotion={dominant.circuit.value if dominant else 'SEEKING'}")
         await self.nervous.fire(Topic.CORTEX_INPUT, {
             "trigger": trigger,
             "text": text,
             "dominant_emotion": dominant.circuit.value if dominant else "SEEKING",
             "max_drive": max_drive,
+            "vitals_summary": vitals_summary,
             "timestamp": now,
         })
         return True
@@ -285,6 +290,22 @@ class AnimatBrain:
         logger.info(f"External speech received: {text[:50]}")
         await self._try_wake_cortex(trigger="external_speech", text=text)
 
+    # ── 稳态摘要构建 ──
+    def _build_vitals_summary(self) -> str:
+        """构建当前稳态的文本摘要，供 Cortex 构造感知提示"""
+        parts = []
+        for vital, val in self.homeostasis._vitals.items():
+            cfg = VITAL_CONFIGS[vital]
+            if val < cfg["danger"]:
+                parts.append(f"{vital.value}极度危险({val:.0f}%)")
+            elif val < cfg["safe_min"]:
+                parts.append(f"{vital.value}偏低({val:.0f}%)")
+            elif val >= cfg["ideal"]:
+                parts.append(f"{vital.value}良好({val:.0f}%)")
+            else:
+                parts.append(f"{vital.value}尚可({val:.0f}%)")
+        return "当前身体状态: " + "，".join(parts)
+
     # ── 状态持久化 ──
     async def _save_state(self):
         """保存当前状态到Redis"""
@@ -315,7 +336,12 @@ class AnimatBrain:
             for vital_name, value in state.items():
                 try:
                     vital = Vital(vital_name)
-                    self.homeostasis._vitals[vital] = float(value)
+                    val = float(value)
+                    # 如果稳态值已归零(之前运行中衰减到0)，恢复到安全最小值
+                    if val <= 0:
+                        val = VITAL_CONFIGS[vital]["safe_min"]
+                        logger.warning(f"Restored dead vital {vital.value}: 0 → {val}")
+                    self.homeostasis._vitals[vital] = val
                 except (ValueError, TypeError):
                     pass
             logger.info(f"State restored: {self.homeostasis._vitals}")

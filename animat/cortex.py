@@ -125,6 +125,7 @@ class Cortex:
         """实际处理意识推理请求"""
         trigger = payload.get("trigger", "unknown")
         external_text = payload.get("text", "")
+        vitals_summary = payload.get("vitals_summary", "")
         logger.info(f"Cortex awakened by: {trigger}")
 
         # 检索偏向记忆
@@ -140,12 +141,22 @@ class Cortex:
 
         messages = [{"role": "system", "content": system_prompt}]
 
-        # 添加对话历史(最近5轮)
-        messages.extend(self._conversation_history[-10:])
-
-        # 如果有外部输入
+        # 根据触发源构造 user message
         if external_text:
+            # 外部语言输入 — 添加到对话历史
+            messages.extend(self._conversation_history[-6:])
             messages.append({"role": "user", "content": external_text})
+        else:
+            # 内部驱力/无聊唤醒 — 不使用对话历史(避免LLM"续写"旧对话导致幻觉)
+            # 构造当前状态的感知提示，让LLM基于实时状态推理
+            perception_prompt = f"[内部状态] 触发原因: {trigger}。{vitals_summary}"
+            if trigger == "boredom":
+                perception_prompt += " 你已经很久没有收到任何外部刺激了，四周一片安静。"
+            elif trigger == "drive":
+                perception_prompt += " 你的某种内在需求正在增长，需要采取行动。"
+            elif trigger == "survival_critical":
+                perception_prompt += " 你的生存正面临严重威胁！"
+            messages.append({"role": "user", "content": perception_prompt})
 
         # ── 调用LLM (不修改任何参数) ──
         try:
@@ -157,13 +168,15 @@ class Cortex:
         # 解析输出
         result = self._parse_response(response)
         if result:
-            # 记录对话历史
+            # 仅在有真实外部输入时更新对话历史
             if external_text:
                 self._conversation_history.append({"role": "user", "content": external_text})
-            self._conversation_history.append({"role": "assistant", "content": response})
-
-            # 只保留最近20条
-            self._conversation_history = self._conversation_history[-20:]
+                self._conversation_history.append({"role": "assistant", "content": result.get("text", response)})
+                # 只保留最近6条(3轮对话)
+                self._conversation_history = self._conversation_history[-6:]
+            else:
+                # 内部驱力唤醒：清空对话历史，防止下次"续写"旧对话
+                self._conversation_history = []
 
             # 存入Redis
             await self.memory.redis.lpush(

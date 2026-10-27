@@ -156,6 +156,9 @@ class HomeostasisEngine:
         }
         for vital, rate in decay_rate.items():
             new_val = self._vitals[vital] - rate * 100
+            # 衰减下限: 不要让稳态自然衰减到0 (0只由极端负面感受触发)
+            min_floor = VITAL_CONFIGS[vital]["danger"] * 0.5
+            new_val = max(min_floor, new_val)
             await self.update_vital(vital, new_val)
 
     # ── 驱力计算 ──
@@ -231,13 +234,23 @@ class HomeostasisEngine:
                         drives=[drive.vital.value],
                         feelings=list(feeling_types),
                     ))
-                else:
+                elif feeling_types:
+                    # 有感受输入时才产生 SEEKING (如看到人、听到声音)
                     emotions.append(EmotionalState(
                         circuit=EmotionCircuit.SEEKING,
                         intensity=drive.deviation,
                         cause="渴望社交互动",
                         drives=[drive.vital.value],
                         feelings=list(feeling_types),
+                    ))
+                else:
+                    # 无任何感受输入 → 无聊而非主动寻求
+                    emotions.append(EmotionalState(
+                        circuit=EmotionCircuit.SEEKING,
+                        intensity=drive.deviation * 0.4,  # 强度降低
+                        cause="没有收到任何外部刺激，感觉空虚",
+                        drives=[drive.vital.value],
+                        feelings=[],
                     ))
 
             # ── 关怀回路 ──
@@ -362,6 +375,20 @@ class HomeostasisEngine:
         elif feeling_type == FeelingType.RECHARGING.value:
             # 充电恢复生存度
             await self.update_vital(Vital.VIABILITY, self._vitals[Vital.VIABILITY] + intensity * 20)
+        elif feeling_type == FeelingType.SOOTHING.value:
+            # 安抚声恢复归属度 + 少量胜任度
+            await self.update_vital(Vital.AFFILIATION, self._vitals[Vital.AFFILIATION] + intensity * 5)
+            await self.update_vital(Vital.COMPETENCE, self._vitals[Vital.COMPETENCE] + intensity * 2)
+        elif feeling_type == FeelingType.GAZE.value:
+            # 被人注视恢复归属度(被关注)
+            await self.update_vital(Vital.AFFILIATION, self._vitals[Vital.AFFILIATION] + intensity * 3)
+        elif feeling_type == FeelingType.APPROACH.value:
+            # 有人靠近恢复归属度+探索度(社交刺激)
+            await self.update_vital(Vital.AFFILIATION, self._vitals[Vital.AFFILIATION] + intensity * 4)
+            await self.update_vital(Vital.EXPLORATION, self._vitals[Vital.EXPLORATION] + intensity * 5)
+        elif feeling_type == FeelingType.CARESS.value or feeling_type == FeelingType.SOOTHING.value:
+            # 积极交互恢复完好度(身心互惠)
+            await self.update_vital(Vital.INTEGRITY, self._vitals[Vital.INTEGRITY] + intensity * 2)
 
         # 触发情感合成 → 仲裁 → 躯体标记
         drives = self._compute_drives()
