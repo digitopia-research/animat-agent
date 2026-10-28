@@ -52,6 +52,7 @@ async def _reset_state():
         RedisKeys.STATE_HOMEOSTASIS,
         RedisKeys.STATE_EMOTION,
         RedisKeys.CORTEX_HISTORY,
+        RedisKeys.MEMORY_SEMANTIC,
     ]
     for key in keys_to_delete:
         await r.delete(key)

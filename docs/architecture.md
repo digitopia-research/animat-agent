@@ -1,5 +1,20 @@
 # An LLM-Based "Artificial Organism" Framework — Animat Agent: From Passive Q&A to Proactive Existence
 
+> **Document status (v0.2).** This document describes the *theoretical* foundation of the
+> framework (the v0.1 dual-process brain: a triggered consciousness process + a high-frequency
+> subconscious process). It is deliberately implementation-agnostic. For what is actually
+> shipped and wired into the runtime, see `README.md` (Roadmap table) and `docs/ROADMAP_v0.2.md`.
+>
+> Key implementation notes that supersede the theory below:
+> - **Phase 1 (Perpetual Stream of Consciousness) is integrated.** The conscious reasoning layer
+>   is no longer only *triggered*; in v0.2 it runs as a perpetual stream (`animat/stream_cortex.py`).
+>   The legacy `animat/cortex.py` has been removed.
+> - **Phases 2 (AttentionModulator) and 4 (VectorMemoryStore) are implemented as standalone modules
+>   (`animat/attention_modulator.py`, `animat/vector_memory.py`) and demo-verified, but are NOT yet
+>   wired into the main runtime.** Production still uses the v0.1 homeostasis text-modulation and
+>   Redis memory (`animat/memory.py`).
+> - The actual deployment uses **EMQX** as the MQTT broker (WebSocket on 8083) and Redis for memory.
+
 ```text
 Animat is a term originating from the Artificial Life research field. An Animat agent is
 a simulated entity (embodied agent) that runs continuously in a physical environment,

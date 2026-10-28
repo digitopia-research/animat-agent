@@ -46,7 +46,9 @@ Animat Agent 不是聊天机器人，而是一个持续运行的"生命体"。�
    │ 躯体标记
    ▼
 ┌──────────────────────────────────────────────────┐
-│  意识推理层 (cortex.py) — 新皮层 (LLM)           │
+│  意识推理层 (stream_cortex.py) — 新皮层 (LLM)     │
+│  · StreamCortex 持续意识流 (Phase 1, 已集成):     │
+│    LLM 永不休眠, 持续生成思维与意图               │
 │  · 在约束的上下文、意图池、记忆中推理             │
 │  · 输出: 意图 + 对话文本                         │
 └──────────────────────────────────────────────────┘
@@ -173,13 +175,37 @@ uv run python -m animat
 
 ### 传感器模拟器
 
-无实体硬件时，可使用内置模拟器进行开发测试：
+无实体硬件时，可使用内置模拟器进行开发测试（需先启动 EMQX + Redis）：
 
 ```bash
+# 交互式模拟器
 uv run python -m animat.simulator
+
+# 后台自动刺激模式 (随机触觉/视觉, 用于观察自主反应)
+ANIMAT_SIM_AUTO_STIM=1 uv run python -m animat.simulator
 ```
 
-模拟器会向 MQTT 发布模拟传感器数据（电量衰减、随机触碰、人体检测等），并提供交互式输入窗口与 Animat 对话。
+模拟器会向 MQTT 发布模拟传感器数据（电量衰减、随机触碰、人体检测等），并提供交互式输入窗口与 Animat 对话。自由文本作为人类语音（`animat/external/speech`）输入；下列斜杠命令注入特定刺激：
+
+```
+刺激命令 (发布给主 Animat):
+  /touch     — 轻抚 (低压+电容) → CARE/安抚
+  /hit       — 撞击 (压力骤升) → 疼痛 → 退缩反射 (绕过 LLM)
+  /approach  — 有人靠近 (1.5m) → 归属偏移
+  /leave     — 人离开 (10m) → 孤独/分离
+  /noise     — 巨响 (dB>85) → 惊吓 → 闪避反射
+  /battery N — 设置电量 N% (如 /battery 15) → 生存危机
+  /temp N    — 设置体温 N°C (如 /temp 43) → 过热焦虑
+
+模拟器控制命令:
+  /charge  — 开始充电
+  /stop    — 停止充电
+  /reset   — 电量重置为 100%
+  /status  — 显示当前状态
+  /help    — 列出命令
+```
+
+浏览器版控制面板见 `animat/simulator_web.html`（连接 `ws://<host>:8083/mqtt`，详见 `docs/simulator_manual.md`）。
 
 ## 项目结构
 
@@ -187,20 +213,36 @@ uv run python -m animat.simulator
 animat-agent/
 ├── animat/
 │   ├── config.py          # 全局配置 (MQTT Topics、稳态阈值、情感优先级)
-│   ├── nervous.py         # MQTT 神经总线
+│   ├── nervous.py         # MQTT 神经总线 (自动重连)
 │   ├── perception.py      # 感知运动层 (感受器映射 + 反射弧)
 │   ├── homeostasis.py     # 内稳态引擎 (驱力 → 情感合成 → 马斯洛仲裁 → 躯体标记)
-│   ├── cortex.py          # 意识推理层 (LLM)
+│   ├── brain.py           # 双进程脑 (StreamCortex 持续层 + 潜意识循环 + 心跳)
+│   ├── stream_cortex.py   # [P1] 恒常意识流引擎 (LLM 永不休眠, 已集成)
+│   ├── thought.py         # [P1] Thought、ActionGate 三层门控、ThoughtJournal (已集成)
+│   ├── attention_modulator.py # [P2] 注意力调制器 (模块已完成, 未接入主运行时)
+│   ├── sensor_window.py   # [P3] 原始传感时序窗口 (已集成)
+│   ├── vector_memory.py   # [P4] faiss 状态依赖记忆 (模块已完成, 未接入主运行时)
+│   ├── llm_backend.py     # 本地 LLM 封装 (llama-cpp-python)
+│   ├── cloud_llm.py       # 云端 LLM backend (OpenAI 兼容)
 │   ├── memory.py          # Redis 记忆系统 (情景/语义记忆)
 │   ├── action.py          # 行为执行层 (意图 → 动作树)
-│   ├── brain.py           # 双进程脑 (潜意识循环 + 意识触发 + 心跳)
 │   ├── main.py            # 启动入口
-│   └── simulator.py       # 传感器模拟器
+│   ├── simulator.py       # MQTT 传感器模拟器 (交互式)
+│   └── simulator_web.html # 浏览器 WebSocket 控制面板
+├── scripts/               # demo 与工具脚本 (含 simulator_v2.py, start_server.sh)
+├── tests/                 # 单元测试 (conftest.py, test_homeostasis.py)
+├── docs/                  # 设计/部署文档 (architecture, ROADMAP_v0.2, simulator_manual…)
 ├── pyproject.toml
 ├── .python-version
 ├── .env.example
-└── 设计框架.md             # 完整理论设计文档
+├── README.md              # 英文文档 (含 Roadmap 与各 Phase 集成状态)
+├── README_cn.md           # 本文件
+└── LICENSE
 ```
+
+> 实现状态：Phase 1 / 3 / 5 已集成到运行中的 agent；Phase 2（AttentionModulator）与
+> Phase 4（VectorMemoryStore）已完成独立模块并经 demo 验证，但主运行时暂未接线（当前生产
+> 仍使用 v0.1 稳态文本调制 + Redis 记忆）。详见 `README.md` 的 Roadmap 表与 `docs/ROADMAP_v0.2.md`。
 
 ## MQTT Topic 通路
 

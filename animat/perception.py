@@ -1,13 +1,24 @@
 """
-感知运动层 — 外周神经系统
+感知运动层 v2 — 外周神经系统
 
-职责:
-  1. 感受器映射: 原始传感器数据 → 心理感受 (Qualia)
-  2. 反射弧: 突发危险 → 绕过大脑的快速响应
-  3. 导数计算: 追踪变化率，存入Redis供后续使用
+核心变更（vs v0.1）:
+  1. 保留反射弧：突发危险 → 绕过 LLM 的快速响应（不变，这是对的）
+  2. 感受器映射降级为"注意力提示"：不再做 pain/caress 的定性判断，
+     而是告诉 LLM "注意看某通道有个急变"，让 LLM 自己从原始序列判断
+  3. 传感器原始数据写入 SensorWindow → 直接暴露给 LLM
+  4. 导数计算保留（供反射弧和注意力提示使用）
+
+与 v0.1 的区别:
+  v0.1:   压力值 → dP/dt > 0.8 → 发射 "pain" 事件 → 边缘系统处理
+  v0.2:   压力值 → 写入 SensorWindow → 同时
+             ├→ 反射弧检查（保留）：dP/dt > 0.8 → 直接缩回
+             └→ 注意力提示：发送 AttentionHint 到 LLM上下文
+           LLM 自己从 [T+0.0, touch: P=0.05], [T+0.1, touch: P=0.88], ...
+           读取原始序列，自己判断"这是个撞击"
 
 订阅: animat/sensor/*
-发布: animat/feeling, animat/reflex
+发布: animat/reflex (保留), animat/feeling (保留)
+新增: sensor_window 写入
 """
 
 import time
@@ -19,39 +30,35 @@ from typing import Optional
 from animat.config import Topic, PerceptionConfig, RedisKeys
 from animat.nervous import NervousSystem
 from animat.memory import MemoryStore
+from animat.sensor_window import SensorWindow, AttentionHint
 
 logger = logging.getLogger("animat.perception")
 
 
-# ─────────────── 感受质 (Qualia) 定义 ───────────────
+# ─────────────── 感受质定义（保留，用于反射弧和注意力提示）───────────────
 class FeelingType(str, Enum):
-    """所有可能的感受类型"""
-    # 触觉
-    PAIN       = "pain"         # 痛觉
-    CARESS     = "caress"       # 抚摸
-    PRESSURE   = "pressure"     # 压迫
-    # 听觉
-    STARTLE    = "startle"      # 惊吓
-    HOSTILE    = "hostile"      # 敌意
-    SOOTHING   = "soothing"     # 安抚
-    # 视觉
-    APPROACH   = "approach"     # 逼近
-    GAZE       = "gaze"         # 凝视
-    ABANDON    = "abandon"      # 遗弃
-    # 内感
-    FATIGUE    = "fatigue"      # 疲惫
-    RECHARGING = "recharging"   # 充电中（生存度恢复）
-    IMBALANCE  = "imbalance"    # 失衡
+    PAIN       = "pain"
+    CARESS     = "caress"
+    PRESSURE   = "pressure"
+    STARTLE    = "startle"
+    HOSTILE    = "hostile"
+    SOOTHING   = "soothing"
+    APPROACH   = "approach"
+    GAZE       = "gaze"
+    ABANDON    = "abandon"
+    FATIGUE    = "fatigue"
+    RECHARGING = "recharging"
+    IMBALANCE  = "imbalance"
 
 
 @dataclass
 class Feeling:
-    """一个感受事件"""
+    """一个感受事件（保留，用于边缘系统兼容）"""
     type: FeelingType
-    intensity: float        # 强度 ∈ [0, 1]
-    source: str             # 来源传感器ID
-    raw_data: dict          # 原始数据快照
-    timestamp: float        # 时间戳
+    intensity: float
+    source: str
+    raw_data: dict
+    timestamp: float
 
     def to_dict(self) -> dict:
         return {
@@ -63,16 +70,29 @@ class Feeling:
         }
 
 
-# ─────────────── 感受器映射器 ───────────────
 class PerceptionLayer:
-    """感知运动层 — 将原始数据映射为感受"""
+    """
+    感知运动层 v2
+    
+    职责:
+      1. 写入传感器原始数据到 SensorWindow
+      2. 生成注意力提示（供 LLM 参考，不替代 LLM 的判断）
+      3. 反射弧（突发危险快速响应，不变）
+      4. 向边缘系统发射感受事件（保留，homeostasis 仍需要）
+    """
 
-    def __init__(self, nervous: NervousSystem, memory: MemoryStore):
+    def __init__(
+        self,
+        nervous: NervousSystem,
+        memory: MemoryStore,
+        sensor_window: Optional[SensorWindow] = None,
+    ):
         self.nervous = nervous
         self.memory = memory
-        self._prev_sensor_data: dict[str, dict] = {}  # 上一帧数据(用于导数计算)
-        self._last_human_detected: Optional[float] = None  # 上次检测到人类的时间
-        self._prev_battery: float = 100.0  # 上一帧电量(用于检测充电状态)
+        self.sensor_window = sensor_window or SensorWindow()
+        self._prev_sensor_data: dict[str, dict] = {}
+        self._last_human_detected: Optional[float] = None
+        self._prev_battery: float = 100.0
 
     async def register(self):
         """注册所有感觉神经末梢"""
@@ -80,37 +100,43 @@ class PerceptionLayer:
         await self.nervous.listen(Topic.SENSOR_AUDIO, self._on_audio)
         await self.nervous.listen(Topic.SENSOR_VISION, self._on_vision)
         await self.nervous.listen(Topic.SENSOR_INTERO, self._on_interoception)
-        logger.info("Perception layer neurons registered")
+        logger.info("Perception layer v2 neurons registered")
 
-    # ── 导数计算 ──
+    # ── 导数计算（保留）──
     async def _compute_derivative(self, key: str, current: float) -> float:
-        """计算某个传感器值的导数(变化率)，并存储到Redis"""
         prev_data = await self.memory.redis.hget(RedisKeys.SENSOR_DERIVATIVES, key)
         prev_val = float(prev_data) if prev_data else current
         derivative = current - prev_val
         await self.memory.redis.hset(RedisKeys.SENSOR_DERIVATIVES, key, str(current))
         return derivative
 
-    # ── 发布感受 ──
+    # ── 发布感受（保留，边缘系统仍需要）──
     async def _emit_feeling(self, feeling: Feeling):
-        """将感受信号发射到神经总线"""
         logger.info(f"Feeling: {feeling.type.value} @ {feeling.intensity:.2f} from {feeling.source}")
         await self.nervous.fire(Topic.FEELING, feeling.to_dict())
 
     # ── 触觉处理 ──
     async def _on_touch(self, topic: str, payload: dict):
-        """
-        触觉感受器映射
-        输入: {"pressure": float, "capacitance": float, "x": float, "y": float}
-        """
+        """触觉：写入 SensorWindow + 注意力提示 + 反射弧"""
         pressure = payload.get("pressure", 0)
         capacitance = payload.get("capacitance", 0)
         now = time.time()
 
+        # v0.2: 原始数据直接写入 SensorWindow
+        self.sensor_window.add_frame("touch", payload)
+
         dp_dt = await self._compute_derivative("touch_pressure", pressure)
 
-        # 痛觉: 瞬间大力
+        # ── 反射弧（保留）──
         if dp_dt > PerceptionConfig.TOUCH_PAIN_THRESHOLD:
+            # 注意力提示（供 LLM 参考，不替代 LLM 判断）
+            self.sensor_window.add_attention_hint(AttentionHint(
+                modality="touch",
+                hint_type="pain",
+                confidence=min(dp_dt / 2.0, 1.0),
+                description="触觉急变（可能撞击）",
+            ))
+            # 仍发射感受事件（边缘系统需要）
             await self._emit_feeling(Feeling(
                 type=FeelingType.PAIN,
                 intensity=min(dp_dt, 1.0),
@@ -118,17 +144,25 @@ class PerceptionLayer:
                 raw_data=payload,
                 timestamp=now,
             ))
-            # 反射弧: 痛觉触发缩回(绕过大脑)
-            await self.nervous.reflex_fire(Topic.REFLEX, {
-                "action": "withdraw",
-                "intensity": min(dp_dt, 1.0),
-                "timestamp": now,
-            })
+            # 反射弧：绕过 LLM 缩回
+            try:
+                await self.nervous.reflex_fire(Topic.REFLEX, {
+                    "action": "withdraw",
+                    "intensity": min(dp_dt, 1.0),
+                    "timestamp": now,
+                })
+            except Exception:
+                logger.error("Reflex 'withdraw' failed", exc_info=True)
             return
 
-        # 抚摸: 低压+电容变化(滑动轨迹)
-        if (pressure < PerceptionConfig.TOUCH_CARE_THRESHOLD
-                and capacitance > 0.1):
+        # 低压 + 电容 → 可能抚摸（注意力提示）
+        if pressure < PerceptionConfig.TOUCH_CARE_THRESHOLD and capacitance > 0.1:
+            self.sensor_window.add_attention_hint(AttentionHint(
+                modality="touch",
+                hint_type="caress",
+                confidence=capacitance,
+                description="轻柔接触（可能抚摸）",
+            ))
             await self._emit_feeling(Feeling(
                 type=FeelingType.CARESS,
                 intensity=capacitance,
@@ -138,7 +172,7 @@ class PerceptionLayer:
             ))
             return
 
-        # 压迫: 持续高压
+        # 持续高压
         if pressure > 0.7:
             await self._emit_feeling(Feeling(
                 type=FeelingType.PRESSURE,
@@ -150,18 +184,24 @@ class PerceptionLayer:
 
     # ── 听觉处理 ──
     async def _on_audio(self, topic: str, payload: dict):
-        """
-        听觉感受器映射
-        输入: {"volume_db": float, "fundamental_freq": float, "text": str}
-        """
+        """听觉：写入 SensorWindow + 注意力提示 + 反射弧"""
         db = payload.get("volume_db", 0)
         freq = payload.get("fundamental_freq", 0)
         now = time.time()
 
+        # v0.2: 原始数据直写
+        self.sensor_window.add_frame("audio", payload)
+
         d_db = await self._compute_derivative("audio_db", db)
 
-        # 惊吓: 巨响突变
+        # 反射弧：巨响 → 防御
         if d_db > PerceptionConfig.AUDIO_STARTLE_DB:
+            self.sensor_window.add_attention_hint(AttentionHint(
+                modality="audio",
+                hint_type="startle",
+                confidence=min(d_db / 100, 1.0),
+                description="音量突变（可能巨响）",
+            ))
             await self._emit_feeling(Feeling(
                 type=FeelingType.STARTLE,
                 intensity=min(d_db / 100, 1.0),
@@ -169,15 +209,17 @@ class PerceptionLayer:
                 raw_data=payload,
                 timestamp=now,
             ))
-            # 反射弧: 惊吓触发防御姿态
-            await self.nervous.reflex_fire(Topic.REFLEX, {
-                "action": "flinch",
-                "intensity": min(d_db / 100, 1.0),
-                "timestamp": now,
-            })
+            try:
+                await self.nervous.reflex_fire(Topic.REFLEX, {
+                    "action": "flinch",
+                    "intensity": min(d_db / 100, 1.0),
+                    "timestamp": now,
+                })
+            except Exception:
+                logger.error("Reflex 'flinch' failed", exc_info=True)
             return
 
-        # 敌意: 高频尖叫
+        # 高频尖叫
         if freq > PerceptionConfig.AUDIO_HOSTILE_FREQ and db > 70:
             await self._emit_feeling(Feeling(
                 type=FeelingType.HOSTILE,
@@ -188,7 +230,7 @@ class PerceptionLayer:
             ))
             return
 
-        # 安抚: 低频平稳
+        # 低频安抚
         if db < PerceptionConfig.AUDIO_SOOTHING_DB and freq < 300:
             await self._emit_feeling(Feeling(
                 type=FeelingType.SOOTHING,
@@ -200,19 +242,24 @@ class PerceptionLayer:
 
     # ── 视觉处理 ──
     async def _on_vision(self, topic: str, payload: dict):
-        """
-        视觉感受器映射
-        输入: {"distance_m": float, "face_detected": bool, "gaze_seconds": float}
-        """
+        """视觉：写入 SensorWindow + 注意力提示"""
         distance = payload.get("distance_m", 10)
         face = payload.get("face_detected", False)
         gaze = payload.get("gaze_seconds", 0)
         now = time.time()
 
+        self.sensor_window.add_frame("vision", payload)
+
         d_dist = await self._compute_derivative("vision_distance", distance)
 
-        # 逼近: 距离快速缩小
+        # 逼近
         if d_dist < -PerceptionConfig.VISION_APPROACH_SPEED:
+            self.sensor_window.add_attention_hint(AttentionHint(
+                modality="vision",
+                hint_type="approach",
+                confidence=min(abs(d_dist) / 2, 1.0),
+                description="物体快速逼近",
+            ))
             await self._emit_feeling(Feeling(
                 type=FeelingType.APPROACH,
                 intensity=min(abs(d_dist) / 2, 1.0),
@@ -231,12 +278,18 @@ class PerceptionLayer:
                 timestamp=now,
             ))
 
-        # 遗弃: 长时间无人
+        # 遗弃
         if face:
             self._last_human_detected = now
         elif self._last_human_detected:
             elapsed = now - self._last_human_detected
             if elapsed > PerceptionConfig.VISION_ABANDON_TIME:
+                self.sensor_window.add_attention_hint(AttentionHint(
+                    modality="vision",
+                    hint_type="abandon",
+                    confidence=min(elapsed / 600, 1.0),
+                    description=f"长时间({elapsed:.0f}s)无人",
+                ))
                 await self._emit_feeling(Feeling(
                     type=FeelingType.ABANDON,
                     intensity=min(elapsed / 600, 1.0),
@@ -247,23 +300,20 @@ class PerceptionLayer:
 
     # ── 内感处理 ──
     async def _on_interoception(self, topic: str, payload: dict):
-        """
-        内感感受器映射
-        输入: {"battery_pct": float, "temperature": float, "imu_tilt_deg": float}
-        """
+        """内感：写入 SensorWindow + 直通稳态"""
         battery = payload.get("battery_pct", 100)
         tilt = payload.get("imu_tilt_deg", 0)
         now = time.time()
 
-        # 直通同步: 电量直接映射到生存度 (viability)
-        # 这是内感的核心——身体状态直接决定稳态，而非仅通过感受间接影响
+        self.sensor_window.add_frame("intero", payload)
+
+        # 直通同步：电量 → 生存度（不变）
         from animat.homeostasis import Vital
-        from animat.config import RedisKeys
         await self.memory.redis.hset(
             RedisKeys.STATE_HOMEOSTASIS, Vital.VIABILITY.value, str(battery)
         )
 
-        # 充电检测: 电量正在上升 → RECHARGING 感受
+        # 充电检测
         if battery > self._prev_battery + 0.5:
             delta = battery - self._prev_battery
             await self._emit_feeling(Feeling(
@@ -274,7 +324,6 @@ class PerceptionLayer:
                 timestamp=now,
             ))
         elif battery < PerceptionConfig.INTERO_LOW_BATTERY:
-            # 疲惫/饥饿: 电量低
             await self._emit_feeling(Feeling(
                 type=FeelingType.FATIGUE,
                 intensity=1.0 - (battery / PerceptionConfig.INTERO_LOW_BATTERY),
@@ -285,8 +334,14 @@ class PerceptionLayer:
 
         self._prev_battery = battery
 
-        # 失衡: 姿态偏差
+        # 失衡
         if tilt > PerceptionConfig.INTERO_IMU_TILT:
+            self.sensor_window.add_attention_hint(AttentionHint(
+                modality="intero",
+                hint_type="imbalance",
+                confidence=min(tilt / 90, 1.0),
+                description="身体失衡",
+            ))
             await self._emit_feeling(Feeling(
                 type=FeelingType.IMBALANCE,
                 intensity=min(tilt / 90, 1.0),
@@ -294,9 +349,11 @@ class PerceptionLayer:
                 raw_data=payload,
                 timestamp=now,
             ))
-            # 反射弧: 失衡触发平衡修正
-            await self.nervous.reflex_fire(Topic.REFLEX, {
-                "action": "stabilize",
-                "intensity": min(tilt / 90, 1.0),
-                "timestamp": now,
-            })
+            try:
+                await self.nervous.reflex_fire(Topic.REFLEX, {
+                    "action": "stabilize",
+                    "intensity": min(tilt / 90, 1.0),
+                    "timestamp": now,
+                })
+            except Exception:
+                logger.error("Reflex 'stabilize' failed", exc_info=True)

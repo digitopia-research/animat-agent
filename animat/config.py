@@ -29,6 +29,7 @@ class Topic:
     # ── 意识推理（新皮层输入/输出）──
     CORTEX_INPUT    = "animat/cortex/input"        # 唤醒LLM的请求
     CORTEX_OUTPUT   = "animat/cortex/output"       # LLM推理结果
+    CORTEX_THOUGHT  = "animat/cortex/thought"      # 每一次内部思维流（内心独白）
 
     # ── 行为执行（新皮层 → 效应器）──
     ACTION          = "animat/action"              # 高层意图
@@ -112,6 +113,12 @@ class BrainConfig:
     COOLDOWN_DRIVE          = 30   # 驱力唤醒后冷却30秒 (让行为有"消化"时间)
     COOLDOWN_BOREDOM        = 60   # 无聊唤醒后冷却60秒
     COOLDOWN_EXTERNAL       = 5    # 外部语音冷却5秒 (人在等回复)
+
+
+# ─────────────────── 共享常量（跨模块引用）───────────────
+class SharedConstants:
+    """模拟器与行为执行层之间的共享常量，避免 magic string"""
+    DIRECTION_CHARGER = "charger"     # 向充电器移动的方向标识
 
 
 # ─────────────────── Redis ───────────────────

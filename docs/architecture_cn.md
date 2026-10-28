@@ -1,5 +1,11 @@
 # 基于大语言模型/LLM设计的“人工系统”，名字叫做Animat Agent，具身“生命体”框架设计：从被动问答到主动存在的理论构建
 
+> **文档状态（v0.2）。** 本文描述的是框架的*理论*基础（v0.1 双进程脑：触发式意识进程 + 高频潜意识进程），刻意与具体实现解耦。关于实际已交付并接入运行时的内容，请以 `README.md`（Roadmap 表）与 `docs/ROADMAP_v0.2.md` 为准。
+>
+> 对下文理论的几处实现层面修正：
+> - **Phase 1（持续意识流）已集成。** 意识推理层不再是“仅触发式”，v0.2 中它作为恒常意识流持续运行（`animat/stream_cortex.py`）。旧的 `animat/cortex.py` 已删除。
+> - **Phase 2（AttentionModulator）与 Phase 4（VectorMemoryStore）已完成为独立模块**（`animat/attention_modulator.py`、`animat/vector_memory.py`）并通过 demo 验证，但**尚未接入主运行时**。当前生产仍使用 v0.1 的稳态文本调制与 Redis 记忆（`animat/memory.py`）。
+> - 实际部署采用 **EMQX** 作为 MQTT Broker（WebSocket 端口 8083），Redis 作为记忆存储。
 
 ```text
 Animat 是一个源自 人工系统 (Artificial Life) 领域的专业术语。现在Animat agent是一个模拟在物理环境中持续运行的实体（具身）agent，它具备：

@@ -13,7 +13,7 @@
 import logging
 from dataclasses import dataclass
 
-from animat.config import Topic, RedisKeys
+from animat.config import Topic, RedisKeys, SharedConstants
 from animat.nervous import NervousSystem
 from animat.memory import MemoryStore
 from animat.homeostasis import EmotionCircuit
@@ -46,7 +46,7 @@ INTENT_ACTION_TREES: dict[str, list[ActionNode]] = {
     "seek_charge": [
         ActionNode(command=MotorCommand.EXPRESSION, params={"face": "worried"}, delay_ms=0),
         ActionNode(command=MotorCommand.LED, params={"color": "yellow", "pattern": "pulse"}, delay_ms=0),
-        ActionNode(command=MotorCommand.MOVE, params={"direction": "charger", "speed": 0.5}),
+        ActionNode(command=MotorCommand.MOVE, params={"direction": SharedConstants.DIRECTION_CHARGER, "speed": 0.5}),
     ],
     "flee": [
         ActionNode(command=MotorCommand.EXPRESSION, params={"face": "scared"}, delay_ms=0),

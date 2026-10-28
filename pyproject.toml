@@ -10,6 +10,19 @@ dependencies = [
     "redis[hiredis]>=5.0.0",
     "openai>=1.0.0",
     "python-dotenv>=1.0.0",
+    "tiktoken>=0.7.0",
+    # 本地 LLM 后端 (GGUF, llama.cpp)。默认装纯 CPU wheel；
+    # 使用 GPU 推理请见 README「本地模型 / GPU」章节重装带 CUDA 的构建。
+    "llama-cpp-python>=0.3.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "pytest-timeout>=2.3",
+    "ruff>=0.9",
+    "mypy>=1.13",
 ]
 
 [project.scripts]
