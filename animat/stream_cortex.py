@@ -21,7 +21,7 @@ from animat.config import Topic
 from animat.nervous import NervousSystem
 from animat.memory import MemoryStore
 from animat.llm_backend import LocalLLM, LLMConfig
-from animat.thought import Thought, ActionGate, ActionDecision, ThoughtJournal
+from animat.thought import Thought, ActionGate, ActionDecision, ThoughtJournal, UtteranceType, classify_utterance
 from animat.attention_modulator import AttentionModulator, BodyState
 from animat.sensor_window import SensorWindow
 
@@ -229,6 +229,12 @@ class StreamCortex:
             drive_level=max_drive,
             is_external_trigger=is_external,
         )
+
+        # 4.5 标注表达类型：回应 / 主动说 / 自言自语
+        if is_external:
+            thought.utterance_type = UtteranceType.RESPONSE
+        else:
+            thought.utterance_type = classify_utterance(self._current_emotion, max_drive)
 
         # 5. 记录
         self.journal.record(thought)
@@ -478,6 +484,7 @@ class StreamCortex:
             "intent": decision.action_type,
             "text": thought.text,
             "action_detail": thought.text,
+            "utterance_type": thought.utterance_type,
             "_source": "stream_cortex",
             "_activation_score": decision.activation_score,
         }
@@ -498,6 +505,7 @@ class StreamCortex:
             await self.nervous.fire(Topic.CORTEX_THOUGHT, {
                 "text": thought.text,
                 "trigger": thought.trigger,            # spontaneous / external
+                "utterance_type": thought.utterance_type,  # soliloquy / proactive / response
                 "emotion": thought.dominant_emotion,
                 "relevance": round(thought.relevance, 3),
                 "activated": activated,                # 是否冲破门控成为外部行为

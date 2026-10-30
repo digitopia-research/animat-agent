@@ -270,7 +270,9 @@ class HomeostasisEngine:
             # ── 归属层 → PANIC / SEEKING ──
             if drive.vital == Vital.AFFILIATION and drive.deviation > 0.3:
                 abandon_weight = feeling_weights.get(FeelingType.ABANDON.value, 0)
-                if abandon_weight > 0.1:
+                # 严重且持续的陪伴缺失(deviation>0.65)也会升级为 PANIC(分离性 distress)，
+                # 而不仅依赖显式的 ABANDON 感受(/leave)。这样长期独处才会真正"喊有人在吗"。
+                if abandon_weight > 0.1 or drive.deviation > 0.65:
                     emotions.append(EmotionalState(
                         circuit=EmotionCircuit.PANIC,
                         intensity=min(drive.deviation + abandon_weight * 0.5, 1.0),

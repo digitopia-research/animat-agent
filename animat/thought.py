@@ -15,6 +15,40 @@ from dataclasses import dataclass, field
 logger = logging.getLogger("animat.thought")
 
 
+# ─────────────── 表达类型 ───────────────
+# 区分一条"说出口"的思维到底属于哪一类，便于观测与调试：
+#   SOLILOQUY — 自言自语：平静的内心独白外化，对空念叨，无明确社交意图
+#   PROACTIVE — 主动说：高唤醒/危机情感(求关注、惊呼、宣泄)驱动、意图对外广播的表达
+#   RESPONSE  — 回应：对外部语音输入的答复
+class UtteranceType:
+    SOLILOQUY = "soliloquy"
+    PROACTIVE = "proactive"
+    RESPONSE = "response"
+
+
+# 高唤醒/危机情感：这些情绪下"说出口"通常是忍不住要对外喊/求关注/宣泄
+_HIGH_AROUSAL_EMOTIONS = {"PANIC", "FEAR", "RAGE"}
+
+
+def classify_utterance(emotion: str, drive_level: float) -> str:
+    """
+    根据当前主导情感，把自发思维归类为 主动说 / 自言自语。
+
+    设计意图（对应 animat 的实际感受）：
+      - 高唤醒/危机情感 PANIC(长期孤独→求关注) / FEAR(受惊) / RAGE(被撞)
+        才是真正的"主动说"——忍不住对外喊/宣泄（"有人在吗""呀撞到我了"）。
+      - 平静的 SEEKING(轻度渴望社交) / CARE / PLAY 即使驱力偏高，也只是
+        内心念叨 → 自言自语，不进对话窗、不对空发声。
+
+    注意：不再用 raw drive_level 直接判 proactive。此前 affiliation 随独处
+    衰减到 0 会让 deviation 饱和到 1.0，使所有平静 SEEKING 都被误判为
+    "主动说"，压扁了 自言自语/主动说 的区分。高驱力本身不等于高唤醒。
+    """
+    if emotion in _HIGH_AROUSAL_EMOTIONS:
+        return UtteranceType.PROACTIVE
+    return UtteranceType.SOLILOQUY
+
+
 @dataclass
 class Thought:
     """LLM 产生的单个内部思维"""
@@ -26,6 +60,9 @@ class Thought:
     dominant_emotion: str = "SEEKING"
     body_state_snapshot: Optional[dict] = field(default_factory=dict)
     trigger: str = "spontaneous"     # 触发源: spontaneous / drive / external / survival
+
+    # 表达类型: soliloquy(自言自语) / proactive(主动说) / response(回应)
+    utterance_type: str = "soliloquy"
     
     # 产生方式
     generation_method: str = "stream"  # stream / complete

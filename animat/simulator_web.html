@@ -62,6 +62,8 @@
     background: rgba(192,132,252,.15); color: var(--purple); }
   .thought.spoken { border-color: var(--green); background: rgba(74,222,128,.08); }
   .thought.spoken .tlabel { background: rgba(74,222,128,.18); color: var(--green); }
+  .thought.proactive { border-color: var(--accent); background: rgba(91,140,255,.10); }
+  .thought.proactive .tlabel { background: rgba(91,140,255,.20); color: var(--accent); }
   .section { margin-bottom: 18px; }
   .section h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .5px;
     color: var(--muted); margin: 0 0 8px; }
@@ -322,13 +324,14 @@ function chatMsg(role, text) {
 const thoughtEl = document.getElementById("thoughtBox");
 function renderThought(t) {
   if (!t || !t.text) return;
+  // 表达类型：主动说(proactive) / 自言自语(soliloquy) / 回应(response)
+  const ut = t.utterance_type || (t.trigger === "external" ? "response" : "soliloquy");
+  const utMap = { response: "回应", proactive: "主动说", soliloquy: "自言自语" };
+  const tlabel = utMap[ut] || (t.activated ? "说出口" : "内心");
   const div = document.createElement("div");
-  div.className = "thought" + (t.activated ? " spoken" : "");
-  const trig = t.trigger === "external" ? "回应" : "自发";
-  const tlabel = t.activated ? "说出口" : "内心";
+  div.className = "thought" + (t.activated ? " spoken" : "") + (ut === "proactive" ? " proactive" : "");
   div.innerHTML =
     `<div class="meta"><span class="tlabel">${tlabel}</span>`
-    + `<span>${trig}</span>`
     + `<span>${t.emotion || ""}</span>`
     + `<span>相关 ${t.relevance != null ? t.relevance.toFixed(2) : "—"}</span></div>`
     + `<div class="body">${String(t.text).replace(/</g, "&lt;")}</div>`;
@@ -383,7 +386,10 @@ function onMessage(topic, payload) {
     const params = data.params || {};
     if (cmd === "move" && params.direction === "charger") charging = true;
     else if (cmd === "move") { /* 离开充电器方向不在此端处理充电停止，仅显示 */ }
-    if (cmd === "speak") chatMsg("animat", params.text || "");
+    if (cmd === "speak") {
+      // 自言自语(soliloquy)不进入"与 Animat 对话"窗口，仅在内心思考窗呈现
+      if (params.utterance_type !== "soliloquy") chatMsg("animat", params.text || "");
+    }
     else log("🔧 Motor: " + cmd + " " + JSON.stringify(params), "motor");
   } else if (topic === TOPIC.CORTEX_OUTPUT) {
     log("🧠 Intent: " + data.intent + " | " + String(data.text || "").slice(0, 80), "cortex");

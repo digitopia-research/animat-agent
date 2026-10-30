@@ -147,19 +147,23 @@ class ActionExecutor:
         intent = payload.get("intent", "idle")
         text = payload.get("text", "")
         action_detail = payload.get("action_detail", "")
+        utterance_type = payload.get("utterance_type")  # 可能为 None（旧字段兼容）
 
         logger.info(f"Executing intent: {intent}, text: {text[:50]}")
 
-        # 1. 语音输出(始终执行)
-        modifier = EMOTION_MODIFIERS.get(self._current_emotion, {})
-        await self.nervous.fire(Topic.MOTOR, {
-            "command": MotorCommand.SPEAK,
-            "params": {
-                "text": text,
-                "rate": modifier.get("speech_rate", 1.0),
-                "volume": modifier.get("volume", 0.7),
-            },
-        })
+        # 1. 语音/对话输出：仅"主动说"与"回应"对外发声并进入对话窗口；
+        #    自言自语(soliloquy)只在内心窗呈现，不对空说话、不进对话流。
+        if utterance_type != "soliloquy":
+            modifier = EMOTION_MODIFIERS.get(self._current_emotion, {})
+            await self.nervous.fire(Topic.MOTOR, {
+                "command": MotorCommand.SPEAK,
+                "params": {
+                    "text": text,
+                    "rate": modifier.get("speech_rate", 1.0),
+                    "volume": modifier.get("volume", 0.7),
+                    "utterance_type": utterance_type,
+                },
+            })
 
         # 2. 意图对应的动作序列
         action_tree = INTENT_ACTION_TREES.get(intent, INTENT_ACTION_TREES["idle"])
