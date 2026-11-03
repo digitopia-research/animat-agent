@@ -252,12 +252,16 @@ class IntegratedAnimat:
             relevance = min(relevance, 1.0)
             trigger = "spontaneous"
 
-        # 创建 Thought
+        # 创建 Thought（外部输入为回复，其余按冲动决定是否开口）
+        intent = "speak" if trigger == "external" else (
+            "speak" if relevance >= 0.5 else "none"
+        )
         thought = Thought(
             text=text,
             relevance=relevance,
             dominant_emotion=self._current_emotion,
             trigger=trigger,
+            intent=intent,
             body_state_snapshot=self._body_state.to_dict(),
         )
 

@@ -233,12 +233,12 @@ class CloudLLM:
         if context_parts:
             messages.append({
                 "role": "user",
-                "content": "\n\n".join(context_parts) + "\n\n产生一个简短的内部想法："
+                "content": "\n\n".join(context_parts) + "\n\n按上面要求的格式产生一个简短的内部想法（先 <intent> 标签，再写想法）："
             })
         else:
             messages.append({
                 "role": "user",
-                "content": "产生一个简短的内部想法："
+                "content": "按上面要求的格式产生一个简短的内部想法（先 <intent> 标签，再写想法）："
             })
 
         return self.stream_complete(

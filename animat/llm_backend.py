@@ -11,12 +11,26 @@
 """
 
 import os
+import re
 import shutil
 import logging
 from typing import Optional, AsyncIterator
 from dataclasses import dataclass, field
 
 logger = logging.getLogger("animat.llm_backend")
+
+# Qwen3 等模型默认开启"思考"(thinking)模式，会在输出里包裹 <think>...</think>
+# 推理块。本项目需要模型直接产出简短动作/想法，因此：
+#   1) 通过 chat_template_kwargs 关闭 thinking (Qwen3 官方模板支持 enable_thinking)
+#   2) 作为兜底，再从输出中剥离任何残留的 <think> 块
+_THINK_RE = re.compile(r"<think>.*?(?:</think>|$)", re.DOTALL)
+
+
+def _strip_thinking(text: str) -> str:
+    """移除输出中的 <think>...</think> 思考块（含未闭合的尾部 <think>）。"""
+    if not text:
+        return text
+    return _THINK_RE.sub("", text).strip()
 
 
 def _detect_nvidia_gpu() -> bool:
@@ -152,14 +166,31 @@ class LocalLLM:
             logit_bias: token_id → bias_value 映射（Phase 2 注意力调制器用）
         """
         self._ensure_loaded()
-        response = self._llm.create_chat_completion(
+        response = self._create_chat_completion(
             messages=messages,
             max_tokens=max_tokens,
             temperature=temperature or self.config.temperature,
             top_p=self.config.top_p,
             logit_bias=logit_bias,
         )
+        # 兜底：剥离可能存在的 <think> 思考块 (Qwen3)
+        msg = response.get("choices", [{}])[0].get("message", {})
+        if isinstance(msg, dict) and isinstance(msg.get("content"), str):
+            msg["content"] = _strip_thinking(msg["content"])
         return response
+
+    def _create_chat_completion(self, **kwargs):
+        """封装 llama_cpp 的 create_chat_completion。
+
+        优先用 enable_thinking=False 关闭 Qwen3 的思考模式；若所用模型的
+        chat 模板不支持该参数（抛错），则去掉该参数重试，确保仍能推理。
+        """
+        kwargs.setdefault("chat_template_kwargs", {"enable_thinking": False})
+        try:
+            return self._llm.create_chat_completion(**kwargs)
+        except (TypeError, ValueError, KeyError, RuntimeError):
+            kwargs.pop("chat_template_kwargs", None)
+            return self._llm.create_chat_completion(**kwargs)
 
     def stream_complete(
         self,
@@ -178,7 +209,7 @@ class LocalLLM:
         - 在 token 间注入新的上下文（未实现，需要底层支持）
         """
         self._ensure_loaded()
-        stream = self._llm.create_chat_completion(
+        stream = self._create_chat_completion(
             messages=messages,
             max_tokens=max_tokens,
             temperature=temperature or self.config.temperature,
@@ -187,6 +218,7 @@ class LocalLLM:
             stream=True,
         )
         accumulated = ""
+        last_stripped = ""
         for chunk in stream:
             if "choices" not in chunk or not chunk["choices"]:
                 continue
@@ -195,11 +227,18 @@ class LocalLLM:
             if not content:
                 continue
             accumulated += content
+            # 增量剥离 <think> 块：基于完整累加文本计算，避免流式中途的
+            # 部分标签被误当正式内容发出（导致 speak text 变成 "<think>"）
+            stripped = _strip_thinking(accumulated)
+            new_part = stripped[len(last_stripped):]
+            last_stripped = stripped
+            if not new_part:
+                continue
             finish_reason = chunk["choices"][0].get("finish_reason")
             yield StreamThought(
-                token_text=content,
+                token_text=new_part,
                 token_id=-1,  # llama-cpp-python stream 不提供 token_id
-                accumulated_text=accumulated,
+                accumulated_text=stripped,
                 is_finished=finish_reason is not None,
                 finish_reason=finish_reason,
             )
@@ -242,12 +281,12 @@ class LocalLLM:
         if context_parts:
             messages.append({
                 "role": "user",
-                "content": "\n\n".join(context_parts) + "\n\n产生一个简短的内部想法："
+                "content": "\n\n".join(context_parts) + "\n\n按上面要求的格式产生一个简短的内部想法（先 <intent> 标签，再写想法）："
             })
         else:
             messages.append({
                 "role": "user",
-                "content": "产生一个简短的内部想法："
+                "content": "按上面要求的格式产生一个简短的内部想法（先 <intent> 标签，再写想法）："
             })
 
         return self.stream_complete(

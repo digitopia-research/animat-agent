@@ -63,6 +63,10 @@ class Thought:
 
     # 表达类型: soliloquy(自言自语) / proactive(主动说) / response(回应)
     utterance_type: str = "soliloquy"
+
+    # 行为意图，由 LLM 生成时显式给出（none/speak/move/expression）
+    # 取代早期基于中文关键词猜测的硬编码分类。
+    intent: str = "none"
     
     # 产生方式
     generation_method: str = "stream"  # stream / complete
@@ -121,6 +125,9 @@ class ActionGate:
       在接入 embedding 之前，5 提供与内容无关的兜底：不管说什么，
       话密就削。这是权宜之计，不是终局方案。
     """
+
+    # 合法动作类型（由 LLM 在生成思维时显式选择）
+    VALID_ACTIONS = frozenset({"none", "speak", "move", "expression"})
 
     # 配置
     BASE_THRESHOLD = 0.7              # 基础阈值
@@ -359,17 +366,16 @@ class ActionGate:
         return overlap / min(len(ga), len(gb))
 
     def _classify_action(self, thought: Thought) -> str:
-        """将思维分类为动作类型"""
-        text = thought.text.lower()
-        # 简单的关键字分类（后续用 LLM 输出自带意图替代）
-        if any(w in text for w in ["说", "讲", "告诉", "你好", "谢谢", "再见", "回答"]):
-            return "speak"
-        elif any(w in text for w in ["走", "去", "移动", "前进", "后退", "找", "探索"]):
-            return "move"
-        elif any(w in text for w in ["表情", "笑", "哭", "害怕", "开心"]):
-            return "expression"
-        else:
-            return "speak"  # 默认说话
+        """确定思维对应的动作类型。
+
+        意图由 LLM 生成思维时显式给出（Thought.intent），这里只做校验与兜底，
+        不再用中文关键词猜测——关键词表对同义改写、跨语言输出都会失效。
+        """
+        intent = (thought.intent or "").strip().lower()
+        if intent in self.VALID_ACTIONS:
+            return intent
+        # 未知/缺失意图 → 视为纯想法，不转化为外部行为
+        return "none"
 
     def _build_reason(
         self, thought: Thought, score: float, threshold: float,

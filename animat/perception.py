@@ -113,7 +113,12 @@ class PerceptionLayer:
     # ── 发布感受（保留，边缘系统仍需要）──
     async def _emit_feeling(self, feeling: Feeling):
         logger.info(f"Feeling: {feeling.type.value} @ {feeling.intensity:.2f} from {feeling.source}")
-        await self.nervous.fire(Topic.FEELING, feeling.to_dict())
+        # 感受是"尽力而为"的遥测：MQTT 瞬时拥堵/超时不应让上游传感器
+        # handler 整体报错（否则内感/视觉等订阅会因一次 publish 失败而中断）。
+        try:
+            await self.nervous.fire(Topic.FEELING, feeling.to_dict())
+        except Exception as e:
+            logger.debug("emit feeling skipped (MQTT unavailable): %s", e)
 
     # ── 触觉处理 ──
     async def _on_touch(self, topic: str, payload: dict):

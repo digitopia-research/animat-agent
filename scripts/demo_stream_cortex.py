@@ -113,6 +113,8 @@ class DemoStreamCortex:
             relevance=relevance,
             dominant_emotion=self._current_emotion,
             trigger="spontaneous" if not self._pending_text else "external",
+            # 有话要说时开口，否则只作为内部想法
+            intent="speak" if relevance >= 0.5 else "none",
         )
 
     _pending_text = None
@@ -134,6 +136,7 @@ class DemoStreamCortex:
             relevance=0.85,
             dominant_emotion=self._current_emotion,
             trigger="external",
+            intent="speak",
         )
 
 

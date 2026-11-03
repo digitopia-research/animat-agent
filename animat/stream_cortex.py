@@ -14,6 +14,8 @@
 import asyncio
 import json
 import logging
+import os
+import re
 import time
 from typing import Optional
 
@@ -37,11 +39,82 @@ CONSCIOUSNESS_SYSTEM_PROMPT = """\
 3. 你的想法应该简短（1-3句话），像人类的内心独白。
 4. 你的想法应该自然——有时是观察，有时是情绪，有时是想做什么。
 5. 不要总是"行动"，大多数想法只是想想而已。
+6. 只输出想法本身，不要写肢体动作、表情或旁白，不要使用 *星号* 包裹动作。
+
+输出格式（严格两行）:
+第一行写意图标签，从下面四选一：
+  <intent>none</intent>       只想一想，不想有任何外部行为（大多数情况）
+  <intent>speak</intent>      想开口说出这句话
+  <intent>move</intent>       想移动身体
+  <intent>expression</intent> 想做个表情
+第二行写想法本身（1-3句话）。
 
 当前状态:
 {body_context}
 
-你的内部想法:"""
+你的输出:"""
+
+
+# ── 对话专用 System Prompt ──
+# 与自发思维 prompt 区分开：回复人类时直接说话，不要写肢体动作/角色扮演描写。
+# (Qwen3 等较大模型在"具身机器人"设定下容易输出 *轻轻转动头部* 之类描写)
+DIALOGUE_SYSTEM_PROMPT = """\
+你是一个名为 Animat 的具身机器人，正在和面前的人对话。
+
+关键规则:
+1. 直接用第一人称口语回答对方说的话，就像真人聊天一样自然。
+2. 绝对不要写肢体动作、表情或旁白描写，不要使用 *星号* 包裹动作。
+3. 回答简短自然，1-3 句话，符合你的人设和当前状态。
+4. 可以表达感受和情绪，但要通过说话表达，而不是描述动作。
+5. 不要输出 Markdown、标题或列表。
+
+当前状态:
+{body_context}
+
+现在直接回答对方："""
+
+
+# 模型有时会把上下文中的调试标记或角色扮演动作描写带进输出，需清洗后再发送
+_DEBUG_PREFIX_RE = re.compile(
+    r"^\s*(?:\[T\+[\d.]+\s*s?\]\s*)?(?:内部想法|内心独白|想法)\s*[:：]\s*"
+)
+_ACTION_DESC_RE = re.compile(r"\*[^*\n]{0,60}\*")
+
+
+# 模型按 prompt 要求输出 <intent>speak</intent> 这样的意图标签
+_INTENT_RE = re.compile(r"<\s*intent\s*>\s*([a-zA-Z]+)\s*<\s*/\s*intent\s*>", re.IGNORECASE)
+_VALID_INTENTS = frozenset({"none", "speak", "move", "expression"})
+
+
+def _parse_intent(text: str, default: str = "none") -> tuple[str, str]:
+    """从模型输出中解析意图标签，返回 (intent, 去掉标签后的正文)。
+
+    意图由模型显式给出，避免用关键词猜测；标签缺失或非法时回退 default。
+    """
+    if not text:
+        return default, ""
+    m = _INTENT_RE.search(text)
+    intent = default
+    if m:
+        candidate = m.group(1).lower()
+        if candidate in _VALID_INTENTS:
+            intent = candidate
+    body = _INTENT_RE.sub("", text)
+    return intent, body.strip()
+
+
+def _sanitize_output(text: str) -> str:
+    """清洗要对外发送的文本：
+    1. 去掉 "[T+630.3s] 内部想法:" 这类调试前缀（模型从传感器上下文模仿而来）
+    2. 去掉 *轻轻转动头部* 这类肢体动作描写
+    3. 去掉残留的 <intent> 标签
+    """
+    if not text:
+        return ""
+    text = _INTENT_RE.sub("", text)
+    text = _DEBUG_PREFIX_RE.sub("", text)
+    text = _ACTION_DESC_RE.sub("", text)
+    return text.strip()
 
 
 class StreamCortex:
@@ -63,8 +136,16 @@ class StreamCortex:
     THINK_INTERVAL_SEC = 3.0        # 思维间隔(秒)
     THINK_INTERVAL_IDLE = 5.0       # 安静时的思维间隔
     THINK_INTERVAL_DRIVEN = 1.5     # 高驱力时思维加速
-    MAX_THINK_TOKENS = 80           # 每个思维的最大 token 数
+    # 每个思维的最大 token 数。
+    # 注意: 过小会导致模型"还没说完正文就耗尽预算"(finish_reason=length，
+    # 内容被截断甚至为空)。实测 Qwen3-8B 中文回答需 >=500 才稳定收尾，
+    # 故默认 512。可用 ANIMAT_MAX_THINK_TOKENS 覆盖。
+    MAX_THINK_TOKENS = int(os.getenv("ANIMAT_MAX_THINK_TOKENS", "512"))
     MAX_CONVERSATION_MEMORY = 10    # 对话记忆窗口
+
+    # 回应对方后的静默期(秒)：期间不再主动开口，只允许内心独白。
+    # 防止"答完一句紧接着自己再接一句"，造成连续刷屏。
+    RESPONSE_COOLDOWN = 8.0
 
     def __init__(
         self,
@@ -101,6 +182,8 @@ class StreamCortex:
         self._thought_count = 0
         self._activation_count = 0
         self._start_time: float = 0.0
+        # 上次回应对方的时间戳（用于静默期抑制自我发散）
+        self._last_response_at: float = 0.0
 
         # 兼容 v0.1 接口
         self._processing = False
@@ -230,11 +313,35 @@ class StreamCortex:
             is_external_trigger=is_external,
         )
 
+        # 3.5 静默期抑制：刚回应过对方时，抑制自发开口，
+        #     否则模型会顺着自己上一句继续发散，形成连续刷屏。
+        if (
+            decision.should_activate
+            and not is_external
+            and decision.action_type == "speak"
+            and (time.time() - self._last_response_at) < self.RESPONSE_COOLDOWN
+        ):
+            decision.should_activate = False
+            decision.action_type = "none"
+            decision.reason += ", response_cooldown"
+
         # 4.5 标注表达类型：回应 / 主动说 / 自言自语
         if is_external:
             thought.utterance_type = UtteranceType.RESPONSE
         else:
             thought.utterance_type = classify_utterance(self._current_emotion, max_drive)
+
+        # 4.6 自言自语(独白)不应进入对话输出通道：
+        #     未被提问时，"说出口"必须是明确的主动表达(PROACTIVE)；
+        #     平缓状态下的独白只是内心活动，静默消化。
+        if (
+            decision.should_activate
+            and decision.action_type == "speak"
+            and thought.utterance_type == UtteranceType.SOLILOQUY
+        ):
+            decision.should_activate = False
+            decision.action_type = "none"
+            decision.reason += ", soliloquy_silent"
 
         # 5. 记录
         self.journal.record(thought)
@@ -248,9 +355,14 @@ class StreamCortex:
             self._activation_count += 1
             await self._emit_action(decision, thought)
 
+        # 6.5 记录刚回应过对方的时间：静默期内不再主动开口，
+        #     避免"答完一句又自己接一句"的连续刷屏。
+        if is_external and decision.should_activate:
+            self._last_response_at = time.time()
+
         # 7. 动态等待间隔
         if external_text:
-            wait_sec = 0.5  # 外部输入后快速产生下一个思维
+            wait_sec = self.RESPONSE_COOLDOWN  # 回应后进入静默期，不急着再说话
         elif max_drive > 0.5:
             wait_sec = self.THINK_INTERVAL_DRIVEN
         elif max_drive < 0.2:
@@ -293,8 +405,14 @@ class StreamCortex:
             # 计算当前身体状态的 token 偏移
             logit_bias = self.modulator.compute_logit_bias(self._body_state)
 
-            # 最近对话历史（让内心独白也能引用刚聊的内容）
-            recent_conv = self._conversation_history[-6:] if self._conversation_history else None
+            # 最近对话历史：只取"对方说过的话"，不喂自己的回复。
+            # 否则模型会把自己上一轮的输出当作待接续的话题，形成
+            # "自己问、自己答"的发散循环（实测一句话连出十余条回复）。
+            recent_conv = (
+                [m for m in self._conversation_history if m.get("role") == "user"][-3:]
+                if self._conversation_history
+                else None
+            ) or None
 
             accumulated = ""
             for stream_thought in self.llm.stream_think(
@@ -316,14 +434,20 @@ class StreamCortex:
         if not accumulated.strip():
             return None
 
+        # 模型按 prompt 输出 <intent>…</intent> + 正文，这里解析出意图
+        intent, body = _parse_intent(accumulated, default="none")
+        if not body:
+            return None
+
         # 计算相关性评分
-        relevance = self._compute_relevance(accumulated)
-        
+        relevance = self._compute_relevance(body)
+
         return Thought(
-            text=accumulated.strip(),
+            text=body,
             relevance=relevance,
             dominant_emotion=self._current_emotion,
             trigger="spontaneous",
+            intent=intent,
             body_state_snapshot={"emotion": self._current_emotion},
         )
 
@@ -331,6 +455,10 @@ class StreamCortex:
         self, system_prompt: str, external_text: str
     ) -> Optional[Thought]:
         """产生对人类的回复思维"""
+        # 对话场景使用专用 prompt：直接口语回答，不写肢体动作描写
+        system_prompt = DIALOGUE_SYSTEM_PROMPT.format(
+            body_context=self._body_context[:500]
+        )
         # 1) 把外部输入记入对话历史（用于上下文连贯，避免"记不住名字"）
         self._conversation_history.append({"role": "user", "content": external_text})
         # 仅保留最近 N 轮
@@ -361,6 +489,11 @@ class StreamCortex:
             logger.error(f"Response think failed: {e}")
             return None
 
+        # 对话场景固定为 speak；若模型自带意图标签则剥离，避免混进回复正文
+        _, text = _parse_intent(text, default="speak")
+        if not text:
+            return None
+
         # 记录 assistant 回复到历史
         self._conversation_history.append({"role": "assistant", "content": text})
 
@@ -373,6 +506,7 @@ class StreamCortex:
             relevance=0.85,  # 回复人类默认高相关性
             dominant_emotion=self._current_emotion,
             trigger="external",
+            intent="speak",  # 对人类的回复就是开口说话
         )
 
     async def _maybe_remember_facts(self, text: str):
@@ -479,11 +613,16 @@ class StreamCortex:
 
     async def _emit_action(self, decision: ActionDecision, thought: Thought):
         """通过 MQTT 发射行为"""
+        # 清洗待发送文本：去掉调试前缀、肢体动作描写等
+        clean_text = _sanitize_output(thought.text)
+        # move / gesture 等非说话动作不应携带大段文本
+        if decision.action_type != "speak":
+            clean_text = ""
         # 构建与 v0.1 兼容的输出格式
         output = {
             "intent": decision.action_type,
-            "text": thought.text,
-            "action_detail": thought.text,
+            "text": clean_text,
+            "action_detail": clean_text,
             "utterance_type": thought.utterance_type,
             "_source": "stream_cortex",
             "_activation_score": decision.activation_score,

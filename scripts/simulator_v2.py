@@ -725,9 +725,12 @@ class _IntegratedAnimat:
             relevance = min(relevance, 1.0)
             trigger = "spontaneous"
 
+        # 意图：外部输入必为回复(speak)；自发思维按表达冲动决定是否开口
+        intent = "speak" if external_text is not None or self._expression_urge > 0.6 else "none"
         thought = Thought(
             text=text, relevance=relevance, dominant_emotion=self._current_emotion,
-            trigger=trigger, body_state_snapshot=self._body_state.to_dict(),
+            trigger=trigger, intent=intent,
+            body_state_snapshot=self._body_state.to_dict(),
         )
         decision = self.action_gate.evaluate(
             thought=thought, drive_level=self._drive_level,
