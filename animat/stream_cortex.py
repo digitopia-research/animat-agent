@@ -23,7 +23,14 @@ from animat.config import Topic
 from animat.nervous import NervousSystem
 from animat.memory import MemoryStore
 from animat.llm_backend import LocalLLM, LLMConfig
-from animat.thought import Thought, ActionGate, ActionDecision, ThoughtJournal, UtteranceType, classify_utterance
+from animat.thought import (
+    Thought,
+    ActionGate,
+    ActionDecision,
+    ThoughtJournal,
+    UtteranceType,
+    classify_utterance,
+)
 from animat.attention_modulator import AttentionModulator, BodyState
 from animat.sensor_window import SensorWindow
 
@@ -40,14 +47,22 @@ CONSCIOUSNESS_SYSTEM_PROMPT = """\
 4. 你的想法应该自然——有时是观察，有时是情绪，有时是想做什么。
 5. 不要总是"行动"，大多数想法只是想想而已。
 6. 只输出想法本身，不要写肢体动作、表情或旁白，不要使用 *星号* 包裹动作。
+7. 你的身体状态只能来自下方"当前状态"给出的数据。不要编造任何
+   未列出的传感器、故障、报警或身体异常（例如"系统过热""温度警告"
+   "内存耗尽"等）——除非当前状态里明确给出了这样的读数。
+   状态里的数字正常时，就说它正常；不要凭空制造危险来吸引注意。
 
 输出格式（严格两行）:
-第一行写意图标签，从下面四选一：
+第一行写意图标签，从下面五个里选一个：
   <intent>none</intent>       只想一想，不想有任何外部行为（大多数情况）
-  <intent>speak</intent>      想开口说出这句话
+  <intent>soliloquy</intent>  自言自语，只是自己念叨吐槽，并不指望有人听见
+  <intent>call</intent>       想对周围发出呼唤，希望有人回应（喊人、求助、呼救、打招呼）
   <intent>move</intent>       想移动身体
   <intent>expression</intent> 想做个表情
 第二行写想法本身（1-3句话）。
+
+注意 speak 与 call 的区别：内心吐槽、感叹、自问自答都算 soliloquy；
+只有当你希望"外面有人能听到并回应"时才是 call。
 
 当前状态:
 {body_context}
@@ -67,6 +82,8 @@ DIALOGUE_SYSTEM_PROMPT = """\
 3. 回答简短自然，1-3 句话，符合你的人设和当前状态。
 4. 可以表达感受和情绪，但要通过说话表达，而不是描述动作。
 5. 不要输出 Markdown、标题或列表。
+6. 你的身体状态只能来自下方"当前状态"。不要编造未列出的传感器、
+   故障或身体异常（如"系统过热""温度报警"），也不要夸大危险。
 
 当前状态:
 {body_context}
@@ -81,9 +98,13 @@ _DEBUG_PREFIX_RE = re.compile(
 _ACTION_DESC_RE = re.compile(r"\*[^*\n]{0,60}\*")
 
 
-# 模型按 prompt 要求输出 <intent>speak</intent> 这样的意图标签
+# 模型按 prompt 要求输出 <intent>call</intent> 这样的意图标签。
+# soliloquy / call 的都属"开口说话"，区别在于是否指望有人回应；
+# 这一区分由模型语义判断，避免用中文关键词表去猜"是不是在呼唤"。
 _INTENT_RE = re.compile(r"<\s*intent\s*>\s*([a-zA-Z]+)\s*<\s*/\s*intent\s*>", re.IGNORECASE)
-_VALID_INTENTS = frozenset({"none", "speak", "move", "expression"})
+_VALID_INTENTS = frozenset({"none", "soliloquy", "call", "move", "expression"})
+# 意图 → 是否允许进入对外输出通道（未被提问时）
+_INTENT_IS_OUTWARD = {"call": True, "soliloquy": False}
 
 
 def _parse_intent(text: str, default: str = "none") -> tuple[str, str]:
@@ -147,6 +168,10 @@ class StreamCortex:
     # 防止"答完一句紧接着自己再接一句"，造成连续刷屏。
     RESPONSE_COOLDOWN = 8.0
 
+    # 主动呼唤(call)后的冷却期(秒)：同一诉求（如电量低求救）在窗口内
+    # 不重复对外发声，避免模型换着措辞把同一件事连说十几遍。
+    CALL_COOLDOWN = float(os.getenv("ANIMAT_CALL_COOLDOWN", "60"))
+
     def __init__(
         self,
         nervous: NervousSystem,
@@ -184,6 +209,8 @@ class StreamCortex:
         self._start_time: float = 0.0
         # 上次回应对方的时间戳（用于静默期抑制自我发散）
         self._last_response_at: float = 0.0
+        # 上次主动呼唤的时间戳（用于呼唤冷却，避免同一诉求刷屏）
+        self._last_call_at: float = 0.0
 
         # 兼容 v0.1 接口
         self._processing = False
@@ -331,17 +358,32 @@ class StreamCortex:
         else:
             thought.utterance_type = classify_utterance(self._current_emotion, max_drive)
 
-        # 4.6 自言自语(独白)不应进入对话输出通道：
-        #     未被提问时，"说出口"必须是明确的主动表达(PROACTIVE)；
-        #     平缓状态下的独白只是内心活动，静默消化。
+        # 4.6 未被提问时，只有模型判定为"想对外呼唤"(call)才真的开口。
+        #     仅靠情感状态判断不够：长期孤独会把情感抬到 PANIC，使每条
+        #     自发思维都被判成 PROACTIVE，内心独白便整片涌进对话通道。
+        #     这里以模型给出的语义意图为准，不做任何关键词匹配。
         if (
             decision.should_activate
             and decision.action_type == "speak"
-            and thought.utterance_type == UtteranceType.SOLILOQUY
+            and not is_external
+            and not _INTENT_IS_OUTWARD.get(thought.intent, False)
         ):
             decision.should_activate = False
             decision.action_type = "none"
             decision.reason += ", soliloquy_silent"
+
+        # 4.7 主动呼唤后的冷却期：同一诉求(如"电量低求救")若不加约束，
+        #     模型会每轮换种措辞再说一遍，连说近十条。REFRACTORY 只拦
+        #     逐字重复，拦不住同义改写，故在此按时间窗口限流。
+        if (
+            decision.should_activate
+            and not is_external
+            and thought.intent == "call"
+            and (time.time() - self._last_call_at) < self.CALL_COOLDOWN
+        ):
+            decision.should_activate = False
+            decision.action_type = "none"
+            decision.reason += ", call_cooldown"
 
         # 5. 记录
         self.journal.record(thought)
@@ -355,10 +397,16 @@ class StreamCortex:
             self._activation_count += 1
             await self._emit_action(decision, thought)
 
-        # 6.5 记录刚回应过对方的时间：静默期内不再主动开口，
-        #     避免"答完一句又自己接一句"的连续刷屏。
-        if is_external and decision.should_activate:
-            self._last_response_at = time.time()
+        # 6.5 记录时间戳：回应后进入静默期，呼唤后进入呼唤冷却，
+        #     两者都是为了抑制"同一件事连续刷屏"。
+        if decision.should_activate:
+            if is_external:
+                self._last_response_at = time.time()
+                # 对方已经回应了，之前的呼唤诉求已被"听见"，
+                # 清除呼唤冷却，让接下来的新诉求能正常发出。
+                self._last_call_at = 0.0
+            elif thought.intent == "call":
+                self._last_call_at = time.time()
 
         # 7. 动态等待间隔
         if external_text:
@@ -489,8 +537,8 @@ class StreamCortex:
             logger.error(f"Response think failed: {e}")
             return None
 
-        # 对话场景固定为 speak；若模型自带意图标签则剥离，避免混进回复正文
-        _, text = _parse_intent(text, default="speak")
+        # 对话场景必然是对外说话；若模型自带意图标签则剥离，避免混进回复正文
+        _, text = _parse_intent(text, default="call")
         if not text:
             return None
 
@@ -506,7 +554,7 @@ class StreamCortex:
             relevance=0.85,  # 回复人类默认高相关性
             dominant_emotion=self._current_emotion,
             trigger="external",
-            intent="speak",  # 对人类的回复就是开口说话
+            intent="call",  # 对人类的回复就是对外说话
         )
 
     async def _maybe_remember_facts(self, text: str):

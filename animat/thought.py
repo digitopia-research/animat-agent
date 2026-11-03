@@ -128,6 +128,16 @@ class ActionGate:
 
     # 合法动作类型（由 LLM 在生成思维时显式选择）
     VALID_ACTIONS = frozenset({"none", "speak", "move", "expression"})
+    # 语义意图 → 动作类型。soliloquy/call 都是"开口"，区别交由上层按意图
+    # 决定是否对外广播（见 StreamCortex 门控）。
+    INTENT_TO_ACTION = {
+        "none": "none",
+        "soliloquy": "speak",
+        "call": "speak",
+        "speak": "speak",
+        "move": "move",
+        "expression": "expression",
+    }
 
     # 配置
     BASE_THRESHOLD = 0.7              # 基础阈值
@@ -368,14 +378,12 @@ class ActionGate:
     def _classify_action(self, thought: Thought) -> str:
         """确定思维对应的动作类型。
 
-        意图由 LLM 生成思维时显式给出（Thought.intent），这里只做校验与兜底，
+        意图由 LLM 生成思维时显式给出（Thought.intent），这里只做映射与兜底，
         不再用中文关键词猜测——关键词表对同义改写、跨语言输出都会失效。
         """
         intent = (thought.intent or "").strip().lower()
-        if intent in self.VALID_ACTIONS:
-            return intent
         # 未知/缺失意图 → 视为纯想法，不转化为外部行为
-        return "none"
+        return self.INTENT_TO_ACTION.get(intent, "none")
 
     def _build_reason(
         self, thought: Thought, score: float, threshold: float,
