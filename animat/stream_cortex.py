@@ -31,6 +31,7 @@ from animat.thought import (
     UtteranceType,
     classify_utterance,
 )
+from animat.tools import init_tools, registry, tools_enabled
 from animat.attention_modulator import AttentionModulator, BodyState
 from animat.sensor_window import SensorWindow
 
@@ -51,6 +52,9 @@ CONSCIOUSNESS_SYSTEM_PROMPT = """\
    未列出的传感器、故障、报警或身体异常（例如"系统过热""温度警告"
    "内存耗尽"等）——除非当前状态里明确给出了这样的读数。
    状态里的数字正常时，就说它正常；不要凭空制造危险来吸引注意。
+8. 要动手就直接调用对应的工具，不要在想法里描述"我应该调用某个函数"。
+   调用工具的那一轮不要再写正文。如果"你刚才做过的事"里已经有结果，
+   就直接使用那个结果回答问题，不要重复调用同一个工具。
 
 输出格式（严格两行）:
 第一行写意图标签，从下面五个里选一个：
@@ -159,10 +163,16 @@ class StreamCortex:
     THINK_INTERVAL_DRIVEN = 1.5     # 高驱力时思维加速
     # 每个思维的最大 token 数。
     # 注意: 过小会导致模型"还没说完正文就耗尽预算"(finish_reason=length，
-    # 内容被截断甚至为空)。实测 Qwen3-8B 中文回答需 >=500 才稳定收尾，
-    # 故默认 512。可用 ANIMAT_MAX_THINK_TOKENS 覆盖。
-    MAX_THINK_TOKENS = int(os.getenv("ANIMAT_MAX_THINK_TOKENS", "512"))
+    # 内容被截断甚至为空)。实测中文回答需 >=500 才稳定收尾，故默认 512。
+    # 开启工具调用后还需额外空间生成 <tool_call> JSON，故提高到 768。
+    # 可用 ANIMAT_MAX_THINK_TOKENS 覆盖。
+    MAX_THINK_TOKENS = int(os.getenv("ANIMAT_MAX_THINK_TOKENS", "768"))
+
+    # 工具结果回注的预算。搜索结果动辄上千字，无限制回注会撑爆 n_ctx。
+    TOOL_RESULT_MAX_CHARS = 600      # 单条上限
+    TOOL_RESULTS_TOTAL_MAX = 1200    # 全部回注内容的上限
     MAX_CONVERSATION_MEMORY = 10    # 对话记忆窗口
+    HISTORY_MAX_CHARS = 2000        # 对话历史总字符上限（约 1300 token）
 
     # 回应对方后的静默期(秒)：期间不再主动开口，只允许内心独白。
     # 防止"答完一句紧接着自己再接一句"，造成连续刷屏。
@@ -211,6 +221,17 @@ class StreamCortex:
         self._last_response_at: float = 0.0
         # 上次主动呼唤的时间戳（用于呼唤冷却，避免同一诉求刷屏）
         self._last_call_at: float = 0.0
+        # 最近几次工具执行结果，回注给下一轮思维做上下文
+        self._tool_results: list[str] = []
+        # 上下文溢出后的退避截止时间，避免失败重试把日志刷屏
+        self._context_fail_cooldown: float = 0.0
+
+        # 初始化工具（全部通过 MQTT 发布，执行器订阅后执行）
+        if tools_enabled():
+            try:
+                init_tools()
+            except Exception as e:
+                logger.error("工具初始化失败: %s", e)
 
         # 兼容 v0.1 接口
         self._processing = False
@@ -248,6 +269,10 @@ class StreamCortex:
         logger.info("═══ StreamCortex consciousness stream started ═══")
         
         while self._running:
+            # 上下文溢出后的退避：不要每秒重试一次把日志刷屏
+            if time.time() < self._context_fail_cooldown:
+                await asyncio.sleep(1.0)
+                continue
             try:
                 await self._think_cycle()
             except Exception:
@@ -397,6 +422,11 @@ class StreamCortex:
             self._activation_count += 1
             await self._emit_action(decision, thought)
 
+        # 6.2 执行模型请求的工具调用（LED/移动/搜索等）。
+        #     工具是"行动"，与上面的"说不说"解耦：独白也可以顺手调个 LED。
+        if thought.tool_calls:
+            await self._execute_tool_calls(thought.tool_calls)
+
         # 6.5 记录时间戳：回应后进入静默期，呼唤后进入呼唤冷却，
         #     两者都是为了抑制"同一件事连续刷屏"。
         if decision.should_activate:
@@ -444,6 +474,8 @@ class StreamCortex:
             sensor_context = self._body_context[:300]
 
         # 产生思维（使用 logit bias 调制注意力）
+        accumulated = ""
+        collected_calls: list[dict] = []
         try:
             # 召回已记住的对方信息，避免幻觉编造
             self_info = await self._recall_self_info()
@@ -462,7 +494,6 @@ class StreamCortex:
                 else None
             ) or None
 
-            accumulated = ""
             for stream_thought in self.llm.stream_think(
                 system_prompt=system_prompt,
                 context_memories=recent_memories,
@@ -470,20 +501,54 @@ class StreamCortex:
                 max_tokens=self.MAX_THINK_TOKENS,
                 logit_bias=logit_bias,           # ← Phase 2: 注意力调制
                 conversation_context=recent_conv,
+                tools=self._enabled_tools(),
+                tool_results=self._tool_results or None,
             ):
                 accumulated = stream_thought.accumulated_text
+                if stream_thought.tool_calls:
+                    collected_calls = stream_thought.tool_calls
                 if stream_thought.is_finished:
                     break
+
         except Exception as e:
-            logger.error(f"Spontaneous think failed: {e}")
-            # 产生一个简单的占位思维
-            accumulated = "...(沉默)..."
+            if "exceed context window" in str(e) or "context" in str(e).lower():
+                # 上下文溢出：清掉体积最大的回注内容（工具结果 + 记忆）
+                # 后重试一次，避免直接放弃。
+                logger.warning("上下文溢出，精简后重试: %s", e)
+                self._tool_results.clear()
+                try:
+                    for stream_thought in self.llm.stream_think(
+                        system_prompt=system_prompt,
+                        context_memories=[],
+                        sensor_context=sensor_context[:200] if sensor_context else "",
+                        max_tokens=self.MAX_THINK_TOKENS,
+                        conversation_context=None,
+                        tools=None,
+                    ):
+                        accumulated = stream_thought.accumulated_text
+                        if stream_thought.is_finished:
+                            break
+                except Exception as e2:
+                    logger.error("精简重试仍失败: %s", e2)
+                    # 退避：让循环慢下来，不要每秒刷一次错误
+                    self._context_fail_cooldown = time.time() + 30.0
+                    return None
+            else:
+                logger.error(f"Spontaneous think failed: {e}")
+                return None
 
         if not accumulated.strip():
             return None
 
         # 模型按 prompt 输出 <intent>…</intent> + 正文，这里解析出意图
         intent, body = _parse_intent(accumulated, default="none")
+
+        # 本轮调用了工具时，正文通常只是"我应该调用 web_search"这类
+        # 过程性叙述，不是要对外说的话。工具本身就是行为，正文静默，
+        # 否则会把"我要去搜索"这种自言自语当成回答念出来。
+        if collected_calls:
+            intent = "none"
+
         if not body:
             return None
 
@@ -496,6 +561,7 @@ class StreamCortex:
             dominant_emotion=self._current_emotion,
             trigger="spontaneous",
             intent=intent,
+            tool_calls=collected_calls,
             body_state_snapshot={"emotion": self._current_emotion},
         )
 
@@ -512,6 +578,9 @@ class StreamCortex:
         # 仅保留最近 N 轮
         if len(self._conversation_history) > self.MAX_CONVERSATION_MEMORY * 2:
             self._conversation_history = self._conversation_history[-self.MAX_CONVERSATION_MEMORY * 2:]
+        # 按总字符数再削一刀：条数达标不代表长度达标，
+        # 几轮长回答叠起来足以撑爆 n_ctx。
+        self._trim_history_by_length()
 
         # 2) 抽取身份/事实性信息存入语义记忆（如"我叫XX"）
         await self._maybe_remember_facts(external_text)
@@ -526,16 +595,46 @@ class StreamCortex:
             {"role": "system", "content": system_prompt},
             *self._conversation_history,
         ]
-        
+        # 对话时也可以调用工具（用户可能直接要求"帮我查一下…"）。
+        # 把最近的工具结果一并给出，避免它不知道刚才已经查过。
+        if self._tool_results:
+            messages.insert(1, {
+                "role": "system",
+                "content": "## 你刚才做过的事:\n" + "\n".join(self._tool_results),
+            })
+
+        tool_calls: list[dict] = []
         try:
             response = self.llm.complete(
                 messages=messages,
                 max_tokens=self.MAX_THINK_TOKENS,
+                tools=self._enabled_tools(),
             )
-            text = response["choices"][0]["message"]["content"].strip()
+            choice = response["choices"][0]
+            tool_calls = choice["message"].get("tool_calls") or []
+            text = (choice["message"].get("content") or "").strip()
         except Exception as e:
             logger.error(f"Response think failed: {e}")
             return None
+
+        # 模型在对话里要求调用工具：先执行，再让它基于结果回答
+        if tool_calls:
+            await self._execute_tool_calls(tool_calls)
+            results = "\n".join(self._tool_results[-2:])
+            messages.append({"role": "assistant", "content": "", "tool_calls": tool_calls})
+            messages.append({
+                "role": "system",
+                "content": f"工具执行结果如下，请基于它直接用口语回答对方：\n{results}",
+            })
+            try:
+                retry = self.llm.complete(
+                    messages=messages,
+                    max_tokens=self.MAX_THINK_TOKENS,
+                )
+                text = (retry["choices"][0]["message"].get("content") or "").strip()
+            except Exception as e:
+                logger.error(f"Tool follow-up failed: {e}")
+                text = ""
 
         # 对话场景必然是对外说话；若模型自带意图标签则剥离，避免混进回复正文
         _, text = _parse_intent(text, default="call")
@@ -606,6 +705,14 @@ class StreamCortex:
             return ""
 
     # ── 对话历史持久化 ──
+    def _trim_history_by_length(self) -> None:
+        """把对话历史的总字符数压到预算内（从最旧的开始丢）。"""
+        budget = self.HISTORY_MAX_CHARS
+        total = sum(len(m.get("content") or "") for m in self._conversation_history)
+        while total > budget and len(self._conversation_history) > 2:
+            dropped = self._conversation_history.pop(0)
+            total -= len(dropped.get("content") or "")
+
     async def _save_history(self):
         """把最近对话历史写入 Redis（重启可延续）"""
         try:
@@ -658,6 +765,59 @@ class StreamCortex:
         
         score = min(action_score + feeling_score + length_penalty + 0.3, 1.0)
         return max(0.0, min(1.0, score))
+
+    def _enabled_tools(self) -> Optional[list[dict]]:
+        """返回本轮可用的工具清单（OpenAI schema）。
+
+        低电量时禁用移动类工具——不能让模型把最后的电耗在走路和亮灯上。
+        """
+        if not tools_enabled():
+            return None
+        names = list(registry.names())
+        battery = self._body_state.get("battery_pct", 100) if isinstance(self._body_state, dict) else 100
+        try:
+            if float(battery) < 20:
+                names = [n for n in names if n not in ("move", "set_led")]
+        except (TypeError, ValueError):
+            pass
+        if not names:
+            return None
+        return registry.openai_tools(enabled=names)
+
+    async def _execute_tool_calls(self, calls: list[dict]) -> None:
+        """执行模型请求的工具调用，结果记日志并回注下一轮上下文。"""
+        for call in calls:
+            fn = (call or {}).get("function") or {}
+            name = fn.get("name", "")
+            raw_args = fn.get("arguments") or "{}"
+            try:
+                args = json.loads(raw_args) if isinstance(raw_args, str) else dict(raw_args)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                logger.warning("工具 %s 的参数不是合法 JSON: %r", name, raw_args)
+                continue
+
+            result = await registry.execute(name, args, nervous=self.nervous)
+            if result.skipped:
+                logger.info("工具 %s 跳过: %s", name, result.skipped)
+            elif result.ok:
+                logger.info("工具 %s 执行成功", name)
+            else:
+                logger.warning("工具 %s 失败: %s", name, result.detail)
+
+            # 回注结果：让下一轮思维知道自己刚才做了什么。
+            # 必须限长：搜索结果动辄上千字，全量回注会直接撑爆 n_ctx
+            # （曾导致 5075 > 4096 的持续报错）。
+            line = result.to_context_line()
+            if line:
+                if len(line) > TOOL_RESULT_MAX_CHARS:
+                    line = line[:TOOL_RESULT_MAX_CHARS] + "…(已截断)"
+                self._tool_results.append(line)
+                # 只保留最近 2 条，且总量不超过预算
+                while len(self._tool_results) > 2:
+                    self._tool_results.pop(0)
+                total = sum(len(x) for x in self._tool_results)
+                while total > TOOL_RESULTS_TOTAL_MAX and len(self._tool_results) > 1:
+                    total -= len(self._tool_results.pop(0))
 
     async def _emit_action(self, decision: ActionDecision, thought: Thought):
         """通过 MQTT 发射行为"""

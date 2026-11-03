@@ -35,6 +35,12 @@ class Topic:
     ACTION          = "animat/action"              # 高层意图
     MOTOR           = "animat/motor"               # 底层动作指令
 
+    # ── 效应器专用通路（LLM 工具调用 → 执行器）──
+    # 真实硬件与模拟器订阅同名话题即可互换，LLM 侧无需改动
+    EFFECTOR_LED        = "animat/effector/led"         # LED 显示器
+    EFFECTOR_EXPRESSION = "animat/effector/expression"  # 表情
+    EFFECTOR_GESTURE    = "animat/effector/gesture"     # 手势
+
     # ── 反射弧（感知层直通效应器，绕过大脑）──
     REFLEX          = "animat/reflex"              # 反射动作
 

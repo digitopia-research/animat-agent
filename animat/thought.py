@@ -67,6 +67,10 @@ class Thought:
     # 行为意图，由 LLM 生成时显式给出（none/speak/move/expression）
     # 取代早期基于中文关键词猜测的硬编码分类。
     intent: str = "none"
+
+    # 模型请求的工具调用（OpenAI 格式的 tool_calls 列表）。
+    # 工具是"行动"，与"说不说"解耦：一条独白也可以顺手调个 LED。
+    tool_calls: list[dict] = field(default_factory=list)
     
     # 产生方式
     generation_method: str = "stream"  # stream / complete

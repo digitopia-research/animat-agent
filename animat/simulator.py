@@ -48,6 +48,8 @@ class SensorSimulator:
         self._running = False
         self._charging = False          # 是否正在充电
         self._charge_rate = 3.0         # 充电速率: %/秒
+        # LED 显示器当前状态（由 set_led 工具驱动，过期后回落到默认）
+        self._led_state = {"color": "white", "pattern": "solid", "until": 0.0}
         # 放电速率: 大电池，降低放电让交流更持久 (默认 0.03~0.08 %/2s)
         self._discharge_rate = float(os.getenv("ANIMAT_SIM_DISCHARGE", "0.05"))
         # 自动随机刺激(触觉/视觉)开关。默认关闭，由用户手动命令发起，
@@ -95,6 +97,10 @@ class SensorSimulator:
             await client.subscribe(Topic.MOTOR, qos=1)
             await client.subscribe(Topic.CORTEX_OUTPUT, qos=1)
             await client.subscribe("animat/heartbeat", qos=0)
+            # 效应器通路：LLM 工具调用（set_led / express / gesture）发到这里
+            await client.subscribe(Topic.EFFECTOR_LED, qos=1)
+            await client.subscribe(Topic.EFFECTOR_EXPRESSION, qos=1)
+            await client.subscribe(Topic.EFFECTOR_GESTURE, qos=1)
 
             # 内感(电量)始终自动上报，否则主进程电量卡死。
             # 触觉/视觉仅在 auto_stim 开启时自动循环，否则由用户手动命令发起。
@@ -213,6 +219,29 @@ class SensorSimulator:
                     logger.info(f"🔧 Motor: {cmd} {params}")
                 else:
                     logger.info(f"🔧 Motor: {cmd} {params}")
+            elif topic == Topic.EFFECTOR_LED:
+                # LED 工具命令直接就是参数本身（registry 已注入 command 字段）
+                self._led_state = {
+                    "color": payload.get("color", "white"),
+                    "pattern": payload.get("pattern", "solid"),
+                    "until": time.time() + payload.get("duration_ms", 3000) / 1000.0,
+                }
+                logger.info(
+                    "💡 LED: %s / %s (%sms)",
+                    self._led_state["color"],
+                    self._led_state["pattern"],
+                    payload.get("duration_ms", 3000),
+                )
+            elif topic == Topic.EFFECTOR_EXPRESSION:
+                logger.info(
+                    "😊 Expression: %s (intensity=%.2f)",
+                    payload.get("emotion", "?"), payload.get("intensity", 0.7),
+                )
+            elif topic == Topic.EFFECTOR_GESTURE:
+                logger.info(
+                    "🤖 Gesture: %s x%s",
+                    payload.get("name", "?"), payload.get("repeat", 1),
+                )
             elif topic == Topic.CORTEX_OUTPUT:
                 logger.info(f"🧠 Intent: {payload.get('intent')} | Text: {payload.get('text', '')[:80]}")
             elif topic == "animat/heartbeat":

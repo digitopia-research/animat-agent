@@ -12,6 +12,7 @@
 
 import os
 import re
+import json
 import shutil
 import logging
 from typing import Optional, AsyncIterator
@@ -25,12 +26,111 @@ logger = logging.getLogger("animat.llm_backend")
 #   2) 作为兜底，再从输出中剥离任何残留的 <think> 块
 _THINK_RE = re.compile(r"<think>.*?(?:</think>|$)", re.DOTALL)
 
+# Qwen 系列在部分 chat 模板下不返回结构化 tool_calls，而是把调用写成
+# <tool_call>{"name": "...", "arguments": {...}}</tool_call> 塞进 content。
+# llama-cpp-python 的 chat_template.default 不会解析它，这里做兜底提取。
+_TOOL_CALL_RE = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.DOTALL)
+
 
 def _strip_thinking(text: str) -> str:
     """移除输出中的 <think>...</think> 思考块（含未闭合的尾部 <think>）。"""
     if not text:
         return text
     return _THINK_RE.sub("", text).strip()
+
+
+def _strip_tool_call_partial(text: str) -> str:
+    """流式场景下剥离 <tool_call> 块，含尚未闭合的半截标签。
+
+    流式时标签往往被切成多片到达，如果只匹配完整块，
+    中途的 "<tool_call>{"name":…" 会被当成正文发出去。
+    """
+    if not text or "<tool_call>" not in text:
+        return text
+    # 先去掉完整块
+    text = _TOOL_CALL_RE.sub("", text)
+    # 再去掉未闭合的尾部（有开标签但还没等到闭标签）
+    start = text.find("<tool_call>")
+    if start != -1:
+        text = text[:start]
+    return text.strip()
+
+
+def _repair_truncated_json(payload: str) -> Optional[dict]:
+    """尝试修复被 max_tokens 截断的工具调用 JSON。
+
+    模型生成长参数时可能被截断，典型形态:
+        {"name": "move", "arguments": {"direction": "forward", "distance_cm": 100
+    只要单次调用本身信息完整（name + 若干成对参数），就值得尽量救回来，
+    而不是整条丢弃。
+    """
+    text = payload.strip()
+    if not text:
+        return None
+
+    # 先去掉末尾残缺的键值对（如 `, "speed": 0.` 或 `, "args`）
+    for cut in range(len(text), 0, -1):
+        candidate = text[:cut].rstrip()
+        candidate = candidate.rstrip(",")
+        # 逐级补全括号
+        opens = candidate.count("{") - candidate.count("}")
+        if opens < 0:
+            continue
+        fixed = candidate + "}" * opens
+        try:
+            obj = json.loads(fixed)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(obj, dict) and (obj.get("name") or obj.get("function")):
+            return obj
+    return None
+
+
+def _extract_tool_calls(text: str) -> tuple[list[dict], str]:
+    """从 content 文本中提取 <tool_call> 标签内的调用。
+
+    返回 (tool_calls, 去掉标签后的正文)。tool_calls 采用 OpenAI 结构，
+    与原生返回格式统一，上层无需区分来源。
+    """
+    if not text or "<tool_call>" not in text:
+        return [], text
+
+    # 完整块 + 末尾可能存在的未闭合块（被 max_tokens 截断的情形）
+    raw_payloads = _TOOL_CALL_RE.findall(text)
+    tail = text.rsplit("<tool_call>", 1)
+    if len(tail) == 2 and "</tool_call>" not in tail[1]:
+        raw_payloads = list(raw_payloads) + [tail[1]]
+
+    calls: list[dict] = []
+    for i, raw in enumerate(raw_payloads):
+        payload = raw.strip()
+        if not payload:
+            continue
+        try:
+            obj = json.loads(payload)
+        except (json.JSONDecodeError, ValueError):
+            obj = _repair_truncated_json(payload)
+            if obj is not None:
+                logger.info("工具调用 JSON 被截断，已修复后继续: %s", obj.get("name"))
+        if not isinstance(obj, dict):
+            logger.debug("无法解析 tool_call 负载: %r", payload[:120])
+            continue
+        name = obj.get("name") or (obj.get("function") or {}).get("name")
+        args = obj.get("arguments")
+        if args is None:
+            args = (obj.get("function") or {}).get("arguments", {})
+        if not name:
+            continue
+        if not isinstance(args, str):
+            args = json.dumps(args, ensure_ascii=False)
+        calls.append({
+            "id": obj.get("id") or f"call_{i}",
+            "type": "function",
+            "function": {"name": name, "arguments": args},
+        })
+
+    cleaned = _TOOL_CALL_RE.sub("", text).strip()
+    return calls, cleaned
 
 
 def _detect_nvidia_gpu() -> bool:
@@ -91,6 +191,8 @@ class StreamThought:
     accumulated_text: str
     is_finished: bool = False
     finish_reason: Optional[str] = None
+    # 仅在流结束时填充：模型请求的工具调用（OpenAI tool_calls 格式）
+    tool_calls: list = field(default_factory=list)
 
 
 class LocalLLM:
@@ -155,28 +257,44 @@ class LocalLLM:
         max_tokens: int = 200,
         temperature: Optional[float] = None,
         logit_bias: Optional[dict[int, float]] = None,
+        tools: Optional[list[dict]] = None,
+        tool_choice: str = "auto",
     ) -> dict:
         """
         非流式推理（兼容 OpenAI 返回格式）
-        
+
         Args:
             messages: chat messages
             max_tokens: 最大生成 token 数
             temperature: 温度（None=使用默认）
             logit_bias: token_id → bias_value 映射（Phase 2 注意力调制器用）
+            tools: OpenAI tools schema 列表；None 表示本轮不做工具调用
+            tool_choice: "auto" 让模型自行决定是否调用
         """
         self._ensure_loaded()
-        response = self._create_chat_completion(
+        kwargs: dict = dict(
             messages=messages,
             max_tokens=max_tokens,
             temperature=temperature or self.config.temperature,
             top_p=self.config.top_p,
             logit_bias=logit_bias,
         )
-        # 兜底：剥离可能存在的 <think> 思考块 (Qwen3)
-        msg = response.get("choices", [{}])[0].get("message", {})
+        if tools:
+            kwargs["tools"] = tools
+            kwargs["tool_choice"] = tool_choice
+        response = self._create_chat_completion(**kwargs)
+        choice = (response.get("choices") or [{}])[0]
+        msg = choice.get("message", {})
         if isinstance(msg, dict) and isinstance(msg.get("content"), str):
-            msg["content"] = _strip_thinking(msg["content"])
+            content = _strip_thinking(msg["content"])
+            # 部分模板把工具调用写在 content 里，这里解析成结构化 tool_calls，
+            # 使上层只需处理一种格式。
+            if tools and "<tool_call>" in content:
+                calls, content = _extract_tool_calls(content)
+                if calls:
+                    msg["tool_calls"] = calls
+                    choice["finish_reason"] = "tool_calls"
+            msg["content"] = content
         return response
 
     def _create_chat_completion(self, **kwargs):
@@ -190,7 +308,17 @@ class LocalLLM:
             return self._llm.create_chat_completion(**kwargs)
         except (TypeError, ValueError, KeyError, RuntimeError):
             kwargs.pop("chat_template_kwargs", None)
-            return self._llm.create_chat_completion(**kwargs)
+            try:
+                return self._llm.create_chat_completion(**kwargs)
+            except Exception as e:
+                # 只有"模板不认识 tools 参数"才降级；上下文溢出等错误
+                # 必须原样抛出，否则会被误判成模板不支持，掩盖真正的问题。
+                if "tools" in kwargs and "context" not in str(e).lower():
+                    logger.warning("当前模型的 chat 模板不支持 tools，本轮退化为纯文本输出")
+                    kwargs.pop("tools", None)
+                    kwargs.pop("tool_choice", None)
+                    return self._llm.create_chat_completion(**kwargs)
+                raise
 
     def stream_complete(
         self,
@@ -198,10 +326,11 @@ class LocalLLM:
         max_tokens: int = 200,
         temperature: Optional[float] = None,
         logit_bias: Optional[dict[int, float]] = None,
+        tools: Optional[list[dict]] = None,
     ):
         """
         流式推理 — 返回生成器，每个 token 实时产出
-        
+
         这是恒常意识流的核心接口。
         LLM 不断产生 token，调用方可以：
         - 实时读取每个 token
@@ -209,7 +338,7 @@ class LocalLLM:
         - 在 token 间注入新的上下文（未实现，需要底层支持）
         """
         self._ensure_loaded()
-        stream = self._create_chat_completion(
+        kwargs: dict = dict(
             messages=messages,
             max_tokens=max_tokens,
             temperature=temperature or self.config.temperature,
@@ -217,30 +346,70 @@ class LocalLLM:
             logit_bias=logit_bias,
             stream=True,
         )
+        if tools:
+            kwargs["tools"] = tools
+            kwargs["tool_choice"] = "auto"
+        stream = self._create_chat_completion(**kwargs)
         accumulated = ""
         last_stripped = ""
+        # 流式 tool_calls 是分片到达的：按 index 累积 name 与 arguments 片段
+        pending_calls: dict[int, dict] = {}
         for chunk in stream:
             if "choices" not in chunk or not chunk["choices"]:
                 continue
-            delta = chunk["choices"][0].get("delta", {})
+            choice = chunk["choices"][0]
+            delta = choice.get("delta", {}) or {}
+
+            for tc in delta.get("tool_calls") or []:
+                idx = tc.get("index", 0)
+                slot = pending_calls.setdefault(
+                    idx, {"id": tc.get("id", f"call_{idx}"), "type": "function",
+                          "function": {"name": "", "arguments": ""}}
+                )
+                fn = tc.get("function") or {}
+                if fn.get("name"):
+                    slot["function"]["name"] += fn["name"]
+                if fn.get("arguments"):
+                    slot["function"]["arguments"] += fn["arguments"]
+
             content = delta.get("content", "")
             if not content:
                 continue
             accumulated += content
-            # 增量剥离 <think> 块：基于完整累加文本计算，避免流式中途的
-            # 部分标签被误当正式内容发出（导致 speak text 变成 "<think>"）
-            stripped = _strip_thinking(accumulated)
+            # 增量剥离 <think> 与 <tool_call> 块：基于完整累加文本计算，
+            # 避免流式中途的半截标签被当作正式内容发出
+            # （曾导致 speak text 变成 "<think>" 或 "<tool_call>{"name":…"）。
+            stripped = _strip_tool_call_partial(_strip_thinking(accumulated))
             new_part = stripped[len(last_stripped):]
             last_stripped = stripped
             if not new_part:
                 continue
-            finish_reason = chunk["choices"][0].get("finish_reason")
+            finish_reason = choice.get("finish_reason")
             yield StreamThought(
                 token_text=new_part,
                 token_id=-1,  # llama-cpp-python stream 不提供 token_id
                 accumulated_text=stripped,
                 is_finished=finish_reason is not None,
                 finish_reason=finish_reason,
+            )
+
+        # 流结束：把累积的工具调用随最后一个片段带出。
+        # 两种来源都要收：原生的分片 tool_calls，以及写在 content 里的
+        # <tool_call> 标签（Qwen 部分模板的行为）。
+        if not pending_calls and "<tool_call>" in accumulated:
+            text_calls, _ = _extract_tool_calls(accumulated)
+            for i, c in enumerate(text_calls):
+                pending_calls[i] = c
+
+        if pending_calls:
+            final_text = _extract_tool_calls(_strip_thinking(accumulated))[1]
+            yield StreamThought(
+                token_text="",
+                token_id=-1,
+                accumulated_text=final_text,
+                is_finished=True,
+                finish_reason="tool_calls",
+                tool_calls=[pending_calls[i] for i in sorted(pending_calls)],
             )
 
     def stream_think(
@@ -251,10 +420,12 @@ class LocalLLM:
         max_tokens: int = 100,
         logit_bias: Optional[dict[int, float]] = None,
         conversation_context: Optional[list[dict]] = None,
+        tools: Optional[list[dict]] = None,
+        tool_results: Optional[list[str]] = None,
     ):
         """
         恒常意识流的核心方法: 产生一个"思维"
-        
+
         与 stream_complete 的区别：
         - 输入不是对话，而是系统 prompt + 上下文
         - 输出是"内部思维"而非"对话回复"
@@ -262,6 +433,9 @@ class LocalLLM:
 
         conversation_context: 最近的人机对话历史(user/assistant)，
           让自发思维也能"记得刚聊了什么"，否则内心独白与对话割裂。
+        tools: OpenAI 格式工具清单；传入后模型可请求调用执行器。
+        tool_results: 最近几次工具执行结果。必须回注，否则模型不知道
+          自己刚刚已经搜过/已经开过灯，会原地反复请求同一个工具。
         """
         messages = [{"role": "system", "content": system_prompt}]
         
@@ -277,6 +451,12 @@ class LocalLLM:
             context_parts.append("## 最近和对方的对话:\n" + conv_lines)
         if sensor_context:
             context_parts.append("## 身体感觉:\n" + sensor_context)
+        if tool_results:
+            # 回注工具结果：模型据此判断"这件事已经做过了"，
+            # 不再无谓地重复请求同一个工具（曾出现同一搜索连发四次）。
+            context_parts.append(
+                "## 你刚才做过的事:\n" + "\n".join(tool_results)
+            )
         
         if context_parts:
             messages.append({
@@ -294,6 +474,7 @@ class LocalLLM:
             max_tokens=max_tokens,
             temperature=self.config.temperature * 1.2,  # 思维阶段温度略高，鼓励多样性
             logit_bias=logit_bias,
+            tools=tools,
         )
 
     def _ensure_loaded(self):
