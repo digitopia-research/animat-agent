@@ -130,6 +130,7 @@ def _parse_intent(text: str, default: str = "none") -> tuple[str, str]:
 
 def _sanitize_output(text: str) -> str:
     """清洗要对外发送的文本：
+
     1. 去掉 "[T+630.3s] 内部想法:" 这类调试前缀（模型从传感器上下文模仿而来）
     2. 去掉 *轻轻转动头部* 这类肢体动作描写
     3. 去掉残留的 <intent> 标签
@@ -171,6 +172,10 @@ class StreamCortex:
     # 工具结果回注的预算。搜索结果动辄上千字，无限制回注会撑爆 n_ctx。
     TOOL_RESULT_MAX_CHARS = 600      # 单条上限
     TOOL_RESULTS_TOTAL_MAX = 1200    # 全部回注内容的上限
+    # 保鲜期：工具结果超过这个时间就从上下文里淡出。
+    # 不加时限的话模型会被同一份数据反复牵住注意力
+    # （实测一条天气搜索结果被换着措辞咀嚼了八个多小时）。
+    TOOL_RESULT_TTL_SEC = float(os.getenv("ANIMAT_TOOL_RESULT_TTL", "90"))
     MAX_CONVERSATION_MEMORY = 10    # 对话记忆窗口
     HISTORY_MAX_CHARS = 2000        # 对话历史总字符上限（约 1300 token）
 
@@ -223,6 +228,8 @@ class StreamCortex:
         self._last_call_at: float = 0.0
         # 最近几次工具执行结果，回注给下一轮思维做上下文
         self._tool_results: list[str] = []
+        # 与 _tool_results 一一对应的时间戳，用于按保鲜期淘汰
+        self._tool_result_times: list[float] = []
         # 上下文溢出后的退避截止时间，避免失败重试把日志刷屏
         self._context_fail_cooldown: float = 0.0
 
@@ -482,6 +489,8 @@ class StreamCortex:
             if self_info:
                 system_prompt = system_prompt + "\n[关于对方你已知的信息] " + self_info
 
+
+
             # 计算当前身体状态的 token 偏移
             logit_bias = self.modulator.compute_logit_bias(self._body_state)
 
@@ -502,7 +511,7 @@ class StreamCortex:
                 logit_bias=logit_bias,           # ← Phase 2: 注意力调制
                 conversation_context=recent_conv,
                 tools=self._enabled_tools(),
-                tool_results=self._tool_results or None,
+                tool_results=self._current_tool_results() or None,
             ):
                 accumulated = stream_thought.accumulated_text
                 if stream_thought.tool_calls:
@@ -596,11 +605,12 @@ class StreamCortex:
             *self._conversation_history,
         ]
         # 对话时也可以调用工具（用户可能直接要求"帮我查一下…"）。
-        # 把最近的工具结果一并给出，避免它不知道刚才已经查过。
-        if self._tool_results:
+        # 把最近仍新鲜的工具结果一并给出，避免它不知道刚才已经查过。
+        fresh_results = self._current_tool_results()
+        if fresh_results:
             messages.insert(1, {
                 "role": "system",
-                "content": "## 你刚才做过的事:\n" + "\n".join(self._tool_results),
+                "content": "## 你刚才做过的事:\n" + "\n".join(fresh_results),
             })
 
         tool_calls: list[dict] = []
@@ -807,17 +817,42 @@ class StreamCortex:
             # 回注结果：让下一轮思维知道自己刚才做了什么。
             # 必须限长：搜索结果动辄上千字，全量回注会直接撑爆 n_ctx
             # （曾导致 5075 > 4096 的持续报错）。
+            # 同时必须带"保鲜期"：只按条数淘汰的话，一条搜索结果会一直
+            # 留在 prompt 里，把模型的注意力钉死在同一个话题上。
             line = result.to_context_line()
             if line:
                 if len(line) > self.TOOL_RESULT_MAX_CHARS:
                     line = line[:self.TOOL_RESULT_MAX_CHARS] + "…(已截断)"
                 self._tool_results.append(line)
-                # 只保留最近 2 条，且总量不超过预算
-                while len(self._tool_results) > 2:
-                    self._tool_results.pop(0)
-                total = sum(len(x) for x in self._tool_results)
-                while total > self.TOOL_RESULTS_TOTAL_MAX and len(self._tool_results) > 1:
-                    total -= len(self._tool_results.pop(0))
+                self._tool_result_times.append(time.time())
+                self._prune_tool_results()
+
+    def _prune_tool_results(self) -> None:
+        """按保鲜期与体积预算裁剪工具结果。
+
+        只按条数淘汰是不够的：一条查天气的结果会一直占据 prompt，
+        模型每轮都在重读同一组数字，于是话题黏着到无法自我脱离
+        （实测一句话之后同一份天气数据被复述十余次）。
+        """
+        now = time.time()
+        # 1) 过期淘汰
+        while self._tool_result_times and (now - self._tool_result_times[0]) > self.TOOL_RESULT_TTL_SEC:
+            self._tool_results.pop(0)
+            self._tool_result_times.pop(0)
+        # 2) 条数上限
+        while len(self._tool_results) > 2:
+            self._tool_results.pop(0)
+            self._tool_result_times.pop(0)
+        # 3) 体积上限
+        total = sum(len(x) for x in self._tool_results)
+        while total > self.TOOL_RESULTS_TOTAL_MAX and len(self._tool_results) > 1:
+            total -= len(self._tool_results.pop(0))
+            self._tool_result_times.pop(0)
+
+    def _current_tool_results(self) -> list[str]:
+        """取当前仍"新鲜"的工具结果，供 prompt 回注。"""
+        self._prune_tool_results()
+        return list(self._tool_results)
 
     async def _emit_action(self, decision: ActionDecision, thought: Thought):
         """通过 MQTT 发射行为"""

@@ -18,6 +18,7 @@ import time
 import logging
 from collections import deque
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Optional
 
 logger = logging.getLogger("animat.sensor_window")
@@ -32,9 +33,22 @@ class SensorFrame:
     raw_payload: dict = field(default_factory=dict)  # 完整 MQTT payload
 
     def to_text(self) -> str:
-        """转换为 LLM 可读的单行文本"""
-        ts = f"T+{self.timestamp % 1000:.1f}s"  # 短时间戳
-        
+        """转换为 LLM 可读的单行文本。
+
+        若 payload 带 event_text（环境模拟器注入的语义描述），
+        优先用自然语言呈现——"有人靠近到 1.2 米并看向你" 比一串
+        数字更容易被模型正确理解，也更不容易被自由发挥成幻觉。
+        """
+        # 用真实时钟而非取模：旧实现 ts % 1000 会让时间戳周期性跳变，
+        # 模型可能把跳变误读成异常。
+        ts = datetime.fromtimestamp(self.timestamp).strftime("%H:%M:%S")
+        event_text = self.raw_payload.get("event_text") if self.raw_payload else None
+
+        if event_text:
+            # 语义事件：自然语言 + 关键读数，两者都给，避免模型凭空推测
+            detail = self._numeric_detail()
+            return f"[{ts}] {event_text}" + (f"（{detail}）" if detail else "")
+
         if self.modality == "touch":
             return (
                 f"[{ts}] 触摸: 压力={self.values.get('pressure', 0):.2f}, "
@@ -61,6 +75,24 @@ class SensorFrame:
             return f"[{ts}] 身体: " + ", ".join(parts)
         else:
             return f"[{ts}] {self.modality}: {self.values}"
+
+    def _numeric_detail(self) -> str:
+        """给出该模态的简短读数，配合 event_text 使用。"""
+        v = self.values
+        if self.modality == "vision":
+            parts = [f"距离{v.get('distance_m', 10):.1f}m"]
+            if v.get("ambient_light") is not None:
+                parts.append(f"光照{v['ambient_light']:.1f}")
+            elif v.get("face_detected"):
+                parts.append("有人脸")
+            return ", ".join(parts)
+        if self.modality == "audio":
+            return f"音量{v.get('volume_db', 0):.0f}dB"
+        if self.modality == "touch":
+            return f"压力{v.get('pressure', 0):.2f}"
+        if self.modality == "intero":
+            return f"电量{v.get('battery_pct', 100):.0f}%, 温度{v.get('temperature', 37):.1f}°C"
+        return ""
 
 
 @dataclass

@@ -236,7 +236,8 @@ animat-agent/
 │   └── simulator_web.html # 浏览器 WebSocket 控制面板
 ├── scripts/               # demo 与工具脚本 (含 simulator_v2.py, start_server.sh)
 ├── tests/                 # 单元测试 (conftest.py, test_homeostasis.py)
-├── docs/                  # 设计/部署文档 (architecture, ROADMAP_v0.2, simulator_manual…)
+├── docs/                  # 设计/部署文档 (architecture, ROADMAP_v0.2, simulator_manual,
+│                          #   environment_simulator_cn — 环境世界模拟器…)
 ├── pyproject.toml
 ├── .python-version
 ├── .env.example

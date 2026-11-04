@@ -4,16 +4,23 @@
 # 用法:
 #   ./scripts/start_server.sh          # 启动（若已在跑则跳过）
 #   ./scripts/start_server.sh start    # 同上
-#   ./scripts/start_server.sh stop     # 停止 animat（不动 MQTT/Redis）
+#   ./scripts/start_server.sh stop     # 停止 animat 与 env_simulator（不动 MQTT/Redis）
 #   ./scripts/start_server.sh restart  # stop + start
 #   ./scripts/start_server.sh status   # 查看各组件状态
+#
+# 环境变量:
+#   ANIMAT_NO_ENV_SIM=1        只起 animat，不起环境模拟器
+#   ANIMAT_ENV_SCENE=lively    环境模拟器场景密度 (quiet/normal/lively)
+#   ANIMAT_ENV_SEED=42         环境模拟器随机种子（可复现）
 #
 set -euo pipefail
 
 PROJECT_DIR="/root/Workspace/animat-agent"
 LOG_DIR="/tmp"
 ANIMAT_LOG="${LOG_DIR}/animat.log"
+ENV_SIM_LOG="${LOG_DIR}/env_simulator.log"
 ANIMAT_BIN="${PROJECT_DIR}/.venv/bin/animat"
+PYTHON_BIN="${PROJECT_DIR}/.venv/bin/python"
 
 port_listening() {
     # $1 = 端口号
@@ -22,6 +29,10 @@ port_listening() {
 
 animat_running() {
     pgrep -f "animat --reset" >/dev/null 2>&1 || pgrep -f "animat.main:cli" >/dev/null 2>&1
+}
+
+env_sim_running() {
+    pgrep -f "animat.env_simulator" >/dev/null 2>&1
 }
 
 start_mosquitto() {
@@ -82,6 +93,50 @@ start_animat() {
     fi
 }
 
+start_env_sim() {
+    if [ "${ANIMAT_NO_ENV_SIM:-0}" = "1" ]; then
+        echo "[ok] 已跳过 env_simulator (ANIMAT_NO_ENV_SIM=1)"
+        return
+    fi
+    if env_sim_running; then
+        echo "[ok] env_simulator 已在运行"
+        return
+    fi
+    cd "${PROJECT_DIR}"
+    echo "[..] 启动 env_simulator（环境世界）"
+    # stdin 接 /dev/null：交互命令不可用，但事件注入与内感上报照常
+    # 需要交互命令时，另开终端手动运行 python -m animat.env_simulator
+    nohup "${PYTHON_BIN}" -m animat.env_simulator \
+        > "${ENV_SIM_LOG}" 2>&1 < /dev/null &
+    sleep 3
+    if env_sim_running; then
+        echo "[ok] env_simulator 已启动，日志 -> ${ENV_SIM_LOG}"
+    else
+        echo "[!] env_simulator 启动失败，日志末尾："
+        tail -n 20 "${ENV_SIM_LOG}" 2>/dev/null || true
+    fi
+}
+
+stop_env_sim() {
+    if ! env_sim_running; then
+        echo "[ok] env_simulator 未运行"
+        return
+    fi
+    echo "[..] 停止 env_simulator"
+    pkill -f "animat.env_simulator" 2>/dev/null || true
+
+    local waited=0
+    while env_sim_running && [ "${waited}" -lt 10 ]; do
+        sleep 1
+        waited=$((waited + 1))
+    done
+    if env_sim_running; then
+        pkill -9 -f "animat.env_simulator" 2>/dev/null || true
+        sleep 1
+    fi
+    env_sim_running && echo "[!] env_simulator 仍未停止" || echo "[ok] env_simulator 已停止"
+}
+
 stop_animat() {
     if ! animat_running; then
         echo "[ok] animat 未运行"
@@ -127,12 +182,13 @@ show_status() {
     port_listening 1883 && echo "mosquitto (1883): 监听中" || echo "mosquitto (1883): 未监听"
     port_listening 6379 && echo "redis (6379):     监听中" || echo "redis (6379):     未监听"
     animat_running && echo "animat:          运行中" || echo "animat:          未运行"
+    env_sim_running && echo "env_simulator:   运行中" || echo "env_simulator:   未运行"
 }
 
 case "${1:-start}" in
-    start)   start_mosquitto; start_redis; start_animat; echo "--- 完成 ---" ;;
-    stop)    stop_animat ;;
-    restart) stop_animat; start_mosquitto; start_redis; start_animat; echo "--- 完成 ---" ;;
+    start)   start_mosquitto; start_redis; start_animat; start_env_sim; echo "--- 完成 ---" ;;
+    stop)    stop_animat; stop_env_sim ;;
+    restart) stop_animat; stop_env_sim; start_mosquitto; start_redis; start_animat; start_env_sim; echo "--- 完成 ---" ;;
     status)  show_status ;;
     *) echo "用法: $0 {start|stop|restart|status}"; exit 1 ;;
 esac

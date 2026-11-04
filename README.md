@@ -443,6 +443,7 @@ animat-agent/
 │   ├── architecture_cn.md           # Architecture documentation (Chinese)
 │   ├── ROADMAP_v0.2.md              # Full v0.2 roadmap (5 phases)
 │   ├── simulator_manual.md          # Sensor simulator + web panel usage guide
+│   ├── environment_simulator_cn.md  # Ambient world simulator (circadian rhythm + events)
 │   ├── local_model_how_it_works.md  # Local LLM deployment & inference notes
 │   └── mosquitto.conf.example       # (legacy) native mosquitto config reference
 │
