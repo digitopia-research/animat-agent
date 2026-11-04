@@ -194,7 +194,15 @@
   button.sec:hover { border-color: var(--line-strong); color: var(--txt); background: var(--bg-card); }
 
   /* ── 布局 ── */
-  .layout { display: grid; grid-template-columns: 330px 1fr; flex: 1 1 auto; min-height: 0; }
+  /* 侧边栏宽度用变量控制，收起时切到一条窄轨，过渡平滑 */
+  .layout {
+    display: grid;
+    grid-template-columns: 330px 1fr;
+    flex: 1 1 auto;
+    min-height: 0;
+    transition: grid-template-columns .26s cubic-bezier(.4, 0, .2, 1);
+  }
+  .layout.side-collapsed { grid-template-columns: 38px 1fr; }
 
   .sidebar {
     background: var(--bg-panel);
@@ -203,11 +211,55 @@
     border-right: 1px solid var(--line);
     padding: 18px 16px 28px;
     overflow-y: auto;
+    overflow-x: hidden;
+    transition: padding .26s ease;
   }
+
+  /* 收起后：内容隐藏，只留一条竖排按钮 */
+  .layout.side-collapsed .sidebar {
+    padding: 12px 0;
+    overflow: hidden;
+  }
+  .layout.side-collapsed .sidebar-inner { display: none; }
+
+  /* 侧边栏顶部的收起按钮 */
+  .side-toggle {
+    display: flex; align-items: center; justify-content: center;
+    width: 100%; padding: 5px 0; margin-bottom: 12px;
+    background: transparent; border: 1px solid var(--line);
+    color: var(--muted); font-size: 10px; letter-spacing: 1px;
+    border-radius: 3px; cursor: pointer; transition: .18s;
+  }
+  .side-toggle:hover { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+
+  /* 收起态下的竖排展开按钮 */
+  .side-expand {
+    display: none;
+    writing-mode: vertical-rl;
+    width: 100%; padding: 14px 0;
+    background: transparent; border: none;
+    color: var(--muted); font-size: 9px; letter-spacing: 3px;
+    text-transform: uppercase; cursor: pointer; transition: .18s;
+  }
+  .side-expand:hover { color: var(--accent); background: var(--accent-soft); }
+  .layout.side-collapsed .side-expand { display: block; }
   .main { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
-  .panes { display: grid; grid-template-columns: 1fr 1fr; flex: 1 1 auto; min-height: 0; }
+  .panes {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    /* 行高必须显式设为 1fr：grid 行默认 auto，会被内容撑高，
+       于是 .thoughts 的 overflow-y 失效，消息一多就把面板顶破。
+       minmax(0, 1fr) 同时允许行缩小到 0，双重保险。 */
+    grid-template-rows: minmax(0, 1fr);
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: hidden;
+  }
   .pane {
-    display: flex; flex-direction: column; min-width: 0; min-height: 0;
+    display: flex; flex-direction: column;
+    min-width: 0; min-height: 0;
+    /* 作为 grid 子项也要能收缩，否则内容会把它顶高 */
+    overflow: hidden;
     border-right: 1px solid var(--line);
   }
   .pane:last-child { border-right: none; }
@@ -219,12 +271,34 @@
     font-size: 9px; text-transform: uppercase; letter-spacing: 2px;
     color: var(--muted); margin: 0 0 10px; font-weight: 700;
     display: flex; align-items: center; gap: 8px;
+    cursor: pointer; user-select: none; transition: color .18s;
   }
+  .section h2:hover { color: var(--txt-dim); }
   .section h2::before {
     content: ""; width: 1px; height: 9px; background: var(--accent); opacity: .8;
+    transition: opacity .18s;
   }
   .section h2::after {
     content: ""; flex: 1; height: 1px; background: var(--line);
+  }
+  /* 折叠箭头 */
+  .section h2 .chev {
+    flex: 0 0 auto; font-size: 8px; color: var(--muted);
+    transition: transform .22s ease; order: 1;
+  }
+  /* 折叠态：箭头转向右，内容收起 */
+  .section.collapsed h2 { margin-bottom: 0; color: var(--muted); opacity: .75; }
+  .section.collapsed h2::before { opacity: .35; }
+  .section.collapsed h2 .chev { transform: rotate(-90deg); }
+  .section-body {
+    overflow: hidden;
+    max-height: 2000px;
+    transition: max-height .3s ease, opacity .22s ease;
+    opacity: 1;
+  }
+  .section.collapsed .section-body {
+    max-height: 0;
+    opacity: 0;
   }
 
   .stats {
@@ -327,8 +401,30 @@
     color: var(--txt-dim); border-bottom: 1px solid var(--line); font-weight: 700;
     display: flex; align-items: baseline; gap: 9px;
     background: rgba(255,255,255,.008);
+    cursor: pointer; user-select: none; transition: color .18s, background .18s;
   }
+  .chat-head:hover { color: var(--txt); background: rgba(255,255,255,.03); }
   .chat-head::before { content: ""; width: 4px; height: 4px; background: var(--accent); border-radius: 50%; }
+  .chat-head .chev {
+    font-size: 8px; color: var(--muted); transition: transform .22s ease;
+    align-self: center;
+  }
+
+  /* 面板折叠：视口与对话/意识流 */
+  .viewport-wrap.collapsed .viewport { display: none; }
+  .viewport-wrap.collapsed .viewport-head { border-bottom: none; }
+  .viewport-wrap.collapsed .chev { transform: rotate(-90deg); }
+  .viewport-head { cursor: pointer; user-select: none; transition: background .18s; }
+  .viewport-head:hover { background: rgba(255,255,255,.03); }
+  .viewport-head .chev {
+    flex: 0 0 auto; font-size: 8px; color: var(--muted);
+    transition: transform .22s ease;
+  }
+
+  .pane.collapsed .chat,
+  .pane.collapsed .thoughts { display: none; }
+  .pane.collapsed .chat-head { border-bottom: none; }
+  .pane.collapsed .chat-head .chev { transform: rotate(-90deg); }
   .head-sub {
     text-transform: none; letter-spacing: .3px; font-weight: 400;
     color: var(--muted); font-size: 9.5px; margin-left: auto;
@@ -336,7 +432,12 @@
 
   /* ── 意识流 ── */
   .thoughts {
-    flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 14px 18px;
+    flex: 1 1 auto;
+    /* flex 子项默认 min-height:auto 会被内容撑高，必须显式归零 */
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding: 14px 18px;
     display: flex; flex-direction: column; gap: 7px;
   }
   .thought {
@@ -371,9 +472,13 @@
 
   /* ── 聊天 ── */
   .chat {
-    flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 18px 20px;
+    flex: 1 1 auto; min-height: 0;
+    overflow-y: auto; overflow-x: hidden;
+    padding: 18px 20px;
     display: flex; flex-direction: column; gap: 11px;
   }
+  /* 思考条目与消息本身不允许撑破父容器 */
+  .thought, .msg { max-width: 100%; }
   .msg { max-width: 84%; display: flex; flex-direction: column; gap: 4px; animation: fadeSlide .28s ease-out; }
   .msg .who { font-size: 8.5px; color: var(--muted); letter-spacing: 1.4px; text-transform: uppercase; }
   .msg .bubble {
@@ -469,6 +574,13 @@
     padding: 3px 9px; font-size: 8.5px; letter-spacing: 1px; border-radius: 2px;
     margin-left: 5px;
   }
+  /* 当前选中的模型按钮 */
+  .viewport-head .cam-btn.sec-active {
+    background: var(--accent-soft) !important;
+    border-color: var(--accent) !important;
+    color: var(--accent) !important;
+    font-weight: 700;
+  }
   .viewport { position: relative; flex: 1 1 auto; min-height: 220px; height: 34vh; overflow: hidden;
     background: #05070b; }
   .viewport canvas { display: block; width: 100%; height: 100%; }
@@ -512,64 +624,78 @@
   </div>
 </header>
 
-<div class="layout">
+<div class="layout" id="layout">
   <!-- 侧边栏：状态 + 刺激 + 控制 -->
-  <div class="sidebar">
+  <div class="sidebar" id="sidebar">
+    <!-- 收起态：竖排展开按钮 -->
+    <button class="side-expand" id="sideExpand" title="展开侧边栏">PANEL</button>
+    <div class="sidebar-inner">
+    <button class="side-toggle" id="sideToggle" title="收起侧边栏">« 收起</button>
     <div class="section">
-      <h2>内部状态</h2>
-      <div class="stats">
-        <div class="stat-row"><span>链路</span><span class="stat-val" id="stLink">—</span></div>
-        <div class="stat-row"><span>主导情绪</span><span class="stat-val" id="stEmotion">—</span></div>
-        <div class="stat-row"><span>情绪强度</span><span class="stat-val" id="stEmoInt">—</span></div>
-        <div class="stat-row"><span>驱力</span><span class="stat-val" id="stDrive">—</span></div>
-        <div class="stat-row"><span>激活率</span><span class="stat-val" id="stActRate">—</span></div>
-        <div class="stat-row"><span>思维 / 分</span><span class="stat-val" id="stRpm">—</span></div>
-        <div class="stat-row"><span>记住的对方</span><span class="stat-val" id="stKnown">—</span></div>
+      <h2>内部状态 <span class="chev">▾</span></h2>
+      <div class="section-body">
+        <div class="stats">
+          <div class="stat-row"><span>链路</span><span class="stat-val" id="stLink">—</span></div>
+          <div class="stat-row"><span>主导情绪</span><span class="stat-val" id="stEmotion">—</span></div>
+          <div class="stat-row"><span>情绪强度</span><span class="stat-val" id="stEmoInt">—</span></div>
+          <div class="stat-row"><span>驱力</span><span class="stat-val" id="stDrive">—</span></div>
+          <div class="stat-row"><span>激活率</span><span class="stat-val" id="stActRate">—</span></div>
+          <div class="stat-row"><span>思维 / 分</span><span class="stat-val" id="stRpm">—</span></div>
+          <div class="stat-row"><span>记住的对方</span><span class="stat-val" id="stKnown">—</span></div>
+        </div>
+        <div class="hint">稳态五维</div>
+        <div class="vitals" id="vitalsBox"></div>
+        <div class="hint">近期对话</div>
+        <div class="conv" id="convBox"><span class="muted">（暂无）</span></div>
       </div>
-      <div class="hint">稳态五维</div>
-      <div class="vitals" id="vitalsBox"></div>
-      <div class="hint">近期对话</div>
-      <div class="conv" id="convBox"><span class="muted">（暂无）</span></div>
     </div>
 
     <div class="section">
-      <h2>世界输入</h2>
-      <div class="stats">
-        <div class="stat-row"><span>环境</span><span class="stat-val" id="stScene">—</span></div>
-        <div class="stat-row"><span>光照</span><span class="stat-val" id="stLight">—</span></div>
-        <div class="stat-row"><span>底噪</span><span class="stat-val" id="stDb">—</span></div>
-        <div class="stat-row"><span>最近事件</span><span class="stat-val" id="stLastEvent">—</span></div>
-        <div class="stat-row" style="margin-top:11px"><span>电量</span><span class="stat-val" id="stBattery">—</span></div>
-        <div class="bar"><span id="barBattery" style="width:0%;background:var(--green)"></span></div>
-        <div class="stat-row" style="margin-top:10px"><span>体温</span><span class="stat-val" id="stTemp">—</span></div>
-        <div class="stat-row"><span>倾角</span><span class="stat-val" id="stTilt">—</span></div>
-        <div class="stat-row"><span>充电中</span><span class="stat-val" id="stCharge">—</span></div>
+      <h2>世界输入 <span class="chev">▾</span></h2>
+      <div class="section-body">
+        <div class="stats">
+          <div class="stat-row"><span>环境</span><span class="stat-val" id="stScene">—</span></div>
+          <div class="stat-row"><span>光照</span><span class="stat-val" id="stLight">—</span></div>
+          <div class="stat-row"><span>底噪</span><span class="stat-val" id="stDb">—</span></div>
+          <div class="stat-row"><span>最近事件</span><span class="stat-val" id="stLastEvent">—</span></div>
+          <div class="stat-row" style="margin-top:11px"><span>电量</span><span class="stat-val" id="stBattery">—</span></div>
+          <div class="bar"><span id="barBattery" style="width:0%;background:var(--green)"></span></div>
+          <div class="stat-row" style="margin-top:10px"><span>体温</span><span class="stat-val" id="stTemp">—</span></div>
+          <div class="stat-row"><span>倾角</span><span class="stat-val" id="stTilt">—</span></div>
+          <div class="stat-row"><span>充电中</span><span class="stat-val" id="stCharge">—</span></div>
+        </div>
+        <div class="hint">外界事件流 · animat/sensor/*</div>
+        <div class="envlog" id="envlogBox"><span class="muted">（暂无事件）</span></div>
       </div>
-      <div class="hint">外界事件流 · animat/sensor/*</div>
-      <div class="envlog" id="envlogBox"><span class="muted">（暂无事件）</span></div>
     </div>
 
     <div class="section">
-      <h2>效应器</h2>
-      <div class="stats">
-        <div class="led-strip" id="ledStrip"></div>
-        <div class="stat-row" style="margin-top:12px"><span>颜色</span><span class="stat-val" id="stLedColor">—</span></div>
-        <div class="stat-row"><span>模式</span><span class="stat-val" id="stLedPattern">—</span></div>
-        <div class="stat-row"><span>表情</span><span class="stat-val" id="stExpr">—</span></div>
-        <div class="stat-row"><span>手势</span><span class="stat-val" id="stGesture">—</span></div>
+      <h2>效应器 <span class="chev">▾</span></h2>
+      <div class="section-body">
+        <div class="stats">
+          <div class="led-strip" id="ledStrip"></div>
+          <div class="stat-row" style="margin-top:12px"><span>颜色</span><span class="stat-val" id="stLedColor">—</span></div>
+          <div class="stat-row"><span>模式</span><span class="stat-val" id="stLedPattern">—</span></div>
+          <div class="stat-row"><span>表情</span><span class="stat-val" id="stExpr">—</span></div>
+          <div class="stat-row"><span>手势</span><span class="stat-val" id="stGesture">—</span></div>
+        </div>
+        <div class="hint">由 LLM 工具调用驱动 · animat/effector/*</div>
       </div>
-      <div class="hint">由 LLM 工具调用驱动 · animat/effector/*</div>
     </div>
 
+    </div><!-- /sidebar-inner -->
   </div>
 
   <!-- 主区：对话 + 内心思考 + 事件日志 + 输入 -->
   <div class="main">
     <!-- 3D 世界视口：把 env_simulator 注入的环境与内感映射到机器人身上 -->
-    <div class="viewport-wrap">
-      <div class="viewport-head">
+    <div class="viewport-wrap" id="vpWrap">
+      <div class="viewport-head" id="vpH">
+        <span class="chev">▾</span>
         物理世界
         <span class="head-sub">3D viewport · 光照 / 倾角 / 电量 / LED 实时映射</span>
+        <button class="cam-btn sec" id="modelRover" title="轮式小车">ROVER</button>
+        <button class="cam-btn sec" id="modelHuman" title="人形机器人">HUMANOID</button>
         <button class="cam-btn sec" id="camTP" title="第三人称">TP</button>
         <button class="cam-btn sec" id="camFP" title="第一人称">FP</button>
         <button class="cam-btn sec" id="camTOP" title="俯视">TOP</button>
@@ -582,15 +708,19 @@
     </div>
     <div class="panes">
       <!-- 左：对话窗口 -->
-      <div class="pane">
-        <div class="chat-head">对话流
+      <div class="pane" id="paneChat">
+        <div class="chat-head" id="chatHeadBtn">
+          <span class="chev">▾</span>
+          对话流
           <span class="head-sub">external speech</span>
         </div>
         <div class="chat" id="chatBox"></div>
       </div>
       <!-- 右：内心思考窗口 -->
-      <div class="pane">
-        <div class="chat-head">意识流
+      <div class="pane" id="paneThought">
+        <div class="chat-head" id="thoughtHeadBtn">
+          <span class="chev">▾</span>
+          意识流
           <span class="head-sub">自发独白 · 多数不说出口</span>
         </div>
         <div class="thoughts" id="thoughtBox"></div>
@@ -686,24 +816,29 @@ const viewport = (function initViewport() {
   }
 
   const scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x07090f);
-  scene.fog = new THREE.FogExp2(0x07090f, 0.012);
+  scene.background = new THREE.Color(0x0a1018);
+  scene.fog = new THREE.FogExp2(0x0a1018, 0.0075);
 
   const camera = new THREE.PerspectiveCamera(55, 1, 0.1, 500);
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  // 轻微曝光提升：整体画面更通透，暗部不死黑
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 1.25;
 
   // ── 灯光 ──
-  const ambient = new THREE.AmbientLight(0x8899bb, 0.55);
+  // 这是"观察用的可视化"，不是物理光照模拟：即使环境传感器报夜间，
+  // 也要保证机器人躯干和地面清晰可见，否则画面一片黑什么也看不到。
+  const ambient = new THREE.AmbientLight(0x8fa3c8, 0.9);
   scene.add(ambient);
 
-  const hemi = new THREE.HemisphereLight(0x99bbff, 0x0a0f18, 0.5);
+  const hemi = new THREE.HemisphereLight(0xaaccff, 0x223044, 0.85);
   scene.add(hemi);
 
   // 主光：强度与色温跟随 ambient_light
-  const keyLight = new THREE.DirectionalLight(0xffffff, 1.1);
+  const keyLight = new THREE.DirectionalLight(0xffffff, 1.8);
   keyLight.position.set(18, 26, 14);
   keyLight.castShadow = true;
   keyLight.shadow.mapSize.width = 1024;
@@ -717,122 +852,335 @@ const viewport = (function initViewport() {
   keyLight.shadow.camera.bottom = -sd;
   scene.add(keyLight);
 
-  // 冷色补光与暖色轮廓光，营造科技感
-  const fillLight = new THREE.PointLight(0x2ad0ff, 0.9, 55);
+  // 冷色补光与暖色轮廓光，营造科技感（强度提高，避免暗部死黑）
+  const fillLight = new THREE.PointLight(0x2ad0ff, 1.6, 70);
   fillLight.position.set(-16, 11, -13);
   scene.add(fillLight);
-  const rimLight = new THREE.PointLight(0x8b5cf6, 0.7, 50);
+  const rimLight = new THREE.PointLight(0x8b5cf6, 1.3, 65);
   rimLight.position.set(16, 9, 15);
   scene.add(rimLight);
 
   // ── 地面 ──
   const FLOOR = 40;
-  const grid = new THREE.GridHelper(FLOOR, 40, 0x1e3350, 0x121c2c);
+  // 网格线提亮，暗环境下也能看清空间尺度
+  const grid = new THREE.GridHelper(FLOOR, 40, 0x3a5a8a, 0x22344f);
   grid.position.y = 0.01;
   scene.add(grid);
 
   const floorMesh = new THREE.Mesh(
     new THREE.PlaneGeometry(FLOOR, FLOOR),
-    new THREE.MeshStandardMaterial({ color: 0x0b1018, roughness: 0.85, metalness: 0.15 })
+    new THREE.MeshStandardMaterial({ color: 0x151d2b, roughness: 0.88, metalness: 0.1 })
   );
   floorMesh.rotation.x = -Math.PI / 2;
   floorMesh.receiveShadow = true;
   scene.add(floorMesh);
 
   // ── 机器人 ──
+  // 全部用基础几何体程序化拼装，不依赖外部模型文件。
+  // 提供两种形态，用户可在标题栏切换；两者共用同一套动画接口。
   const robot = new THREE.Group();
   scene.add(robot);
 
-  const matBody   = new THREE.MeshStandardMaterial({ color: 0x1b2537, roughness: 0.35, metalness: 0.85 });
-  const matPlate  = new THREE.MeshStandardMaterial({ color: 0x0d1420, roughness: 0.5, metalness: 0.9 });
+  // 材质：metalness 高会让物体在暗环境下只剩反射光，几乎看不见。
+  // 这里统一提高基色明度、降低 metalness，保证任何光照下都能看清轮廓。
+  const matBody   = new THREE.MeshStandardMaterial({ color: 0x35486b, roughness: 0.42, metalness: 0.55 });
+  const matPlate  = new THREE.MeshStandardMaterial({ color: 0x22304a, roughness: 0.55, metalness: 0.6 });
   const matEye    = new THREE.MeshBasicMaterial({ color: 0x3ddc97 });
   const matGlow   = new THREE.MeshBasicMaterial({ color: 0x3ddc97 });
+  // 人形装甲：浅蓝灰，与深色关节形成层次
+  const matArmor  = new THREE.MeshStandardMaterial({ color: 0x4a5f85, roughness: 0.38, metalness: 0.6 });
+  const matJoint  = new THREE.MeshStandardMaterial({ color: 0x1a2436, roughness: 0.7, metalness: 0.4 });
 
-  // 底盘
-  const chassis = new THREE.Mesh(new THREE.BoxGeometry(1.7, 0.5, 2.3), matBody);
-  chassis.position.y = 0.55;
-  chassis.castShadow = true;
-  robot.add(chassis);
+  // ── 共享的可动部件（由模型工厂填充，动画循环统一驱动）──
+  let wheels = [];      // 小车：四个轮子
+  let turret = null;    // 小车：云台；人形：上半身
+  let antenna = null;   // 天线（两种模型都有）
+  let eyes = [];        // 眼睛（亮度/形状随电量与表情）
+  let ledBar = null;    // LED 灯带
+  let ledLight = null;  // LED 点光源
+  let headLight = null; // 注意力光锥
+  let arms = [];        // 人形：手臂
+  let legs = [];        // 人形：腿
 
-  // 顶板
-  const topPlate = new THREE.Mesh(new THREE.BoxGeometry(1.45, 0.12, 1.85), matPlate);
-  topPlate.position.y = 0.86;
-  topPlate.castShadow = true;
-  robot.add(topPlate);
+  // ═══ 模型 A：轮式小车（默认）═══
+  function buildRover() {
+    const g = new THREE.Group();
 
-  // LED 灯带（映射 set_led 的颜色与闪烁）
-  const ledBar = new THREE.Mesh(new THREE.BoxGeometry(1.25, 0.06, 0.16), matGlow);
-  ledBar.position.set(0, 0.94, -0.62);
-  robot.add(ledBar);
-  const ledLight = new THREE.PointLight(0x3ddc97, 0.7, 9);
-  ledLight.position.set(0, 1.0, -0.62);
-  robot.add(ledLight);
+    // 底盘
+    const chassis = new THREE.Mesh(new THREE.BoxGeometry(1.7, 0.5, 2.3), matBody);
+    chassis.position.y = 0.55;
+    chassis.castShadow = true;
+    g.add(chassis);
 
-  // 轮子
-  const wheels = [];
-  const wheelGeo = new THREE.CylinderGeometry(0.32, 0.32, 0.26, 20);
-  wheelGeo.rotateZ(Math.PI / 2);
-  [[-0.85, 0.32, 0.72], [0.85, 0.32, 0.72], [-0.85, 0.32, -0.72], [0.85, 0.32, -0.72]]
-    .forEach(([x, y, z]) => {
-      const w = new THREE.Mesh(wheelGeo, matPlate);
-      w.position.set(x, y, z);
-      w.castShadow = true;
-      robot.add(w);
-      wheels.push(w);
+    // 顶板
+    const topPlate = new THREE.Mesh(new THREE.BoxGeometry(1.45, 0.12, 1.85), matPlate);
+    topPlate.position.y = 0.86;
+    topPlate.castShadow = true;
+    g.add(topPlate);
+
+    // LED 灯带
+    const bar = new THREE.Mesh(new THREE.BoxGeometry(1.25, 0.06, 0.16), matGlow);
+    bar.position.set(0, 0.94, -0.62);
+    g.add(bar);
+
+    const light = new THREE.PointLight(0x3ddc97, 0.7, 9);
+    light.position.set(0, 1.0, -0.62);
+    g.add(light);
+
+    // 轮子
+    const ws = [];
+    const wheelGeo = new THREE.CylinderGeometry(0.32, 0.32, 0.26, 20);
+    wheelGeo.rotateZ(Math.PI / 2);
+    [[-0.85, 0.32, 0.72], [0.85, 0.32, 0.72], [-0.85, 0.32, -0.72], [0.85, 0.32, -0.72]]
+      .forEach(([x, y, z]) => {
+        const w = new THREE.Mesh(wheelGeo, matPlate);
+        w.position.set(x, y, z);
+        w.castShadow = true;
+        g.add(w);
+        ws.push(w);
+      });
+
+    // 云台 + 头
+    const tur = new THREE.Group();
+    tur.position.set(0, 1.0, -0.1);
+    g.add(tur);
+
+    const turretBase = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.56, 0.3, 18), matBody);
+    turretBase.castShadow = true;
+    tur.add(turretBase);
+
+    const head = new THREE.Mesh(new THREE.BoxGeometry(0.72, 0.34, 0.56), matPlate);
+    head.position.set(0, 0.28, 0.06);
+    head.castShadow = true;
+    tur.add(head);
+
+    // 眼睛
+    const es = [];
+    const eyeGeo = new THREE.SphereGeometry(0.075, 14, 14);
+    [-0.17, 0.17].forEach(x => {
+      const e = new THREE.Mesh(eyeGeo, matEye.clone());
+      e.position.set(x, 0.28, 0.35);
+      tur.add(e);
+      es.push(e);
     });
 
-  // 云台 + 头
-  const turret = new THREE.Group();
-  turret.position.set(0, 1.0, -0.1);
-  robot.add(turret);
+    // 天线
+    const ant = new THREE.Mesh(new THREE.CylinderGeometry(0.015, 0.015, 0.42, 8), matPlate);
+    ant.position.set(0.24, 0.62, -0.08);
+    tur.add(ant);
+    const antTip = new THREE.Mesh(new THREE.SphereGeometry(0.045, 10, 10), matGlow.clone());
+    antTip.position.set(0.24, 0.85, -0.08);
+    tur.add(antTip);
 
-  const turretBase = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.56, 0.3, 18), matBody);
-  turretBase.castShadow = true;
-  turret.add(turretBase);
+    // 注意力光锥
+    const spot = new THREE.SpotLight(0x3ddc97, 1.4, 14, Math.PI / 7, 0.6);
+    spot.position.set(0, 0.28, 0.3);
+    spot.target.position.set(0, 0.1, 6);
+    tur.add(spot);
+    tur.add(spot.target);
 
-  const head = new THREE.Mesh(new THREE.BoxGeometry(0.72, 0.34, 0.56), matPlate);
-  head.position.set(0, 0.28, 0.06);
-  head.castShadow = true;
-  turret.add(head);
+    return {
+      group: g, wheels: ws, turret: tur, antenna: ant, eyes: es,
+      ledBar: bar, ledLight: light, headLight: spot, arms: [], legs: [],
+    };
+  }
 
-  // 眼睛：亮度随电量，形状随表情
-  const eyes = [];
-  const eyeGeo = new THREE.SphereGeometry(0.075, 14, 14);
-  [-0.17, 0.17].forEach(x => {
-    const e = new THREE.Mesh(eyeGeo, matEye.clone());
-    e.position.set(x, 0.28, 0.35);
-    turret.add(e);
-    eyes.push(e);
-  });
+  // ═══ 模型 B：人形机器人 ═══
+  function buildHumanoid() {
+    const g = new THREE.Group();
 
-  // 天线
-  const antenna = new THREE.Mesh(new THREE.CylinderGeometry(0.015, 0.015, 0.42, 8), matPlate);
-  antenna.position.set(0.24, 0.62, -0.08);
-  turret.add(antenna);
-  const antennaTip = new THREE.Mesh(new THREE.SphereGeometry(0.045, 10, 10), matGlow.clone());
-  antennaTip.position.set(0.24, 0.85, -0.08);
-  turret.add(antennaTip);
+    // 骨盆 + 躯干
+    const pelvis = new THREE.Mesh(new THREE.BoxGeometry(0.62, 0.28, 0.4), matPlate);
+    pelvis.position.y = 1.02;
+    pelvis.castShadow = true;
+    g.add(pelvis);
 
-  // 投影光锥（看向前方，象征注意力）
-  const headLight = new THREE.SpotLight(0x3ddc97, 1.4, 14, Math.PI / 7, 0.6);
-  headLight.position.set(0, 0.28, 0.3);
-  headLight.target.position.set(0, 0.1, 6);
-  turret.add(headLight);
-  turret.add(headLight.target);
+    const torso = new THREE.Mesh(new THREE.BoxGeometry(0.78, 0.86, 0.46), matArmor);
+    torso.position.y = 1.58;
+    torso.castShadow = true;
+    g.add(torso);
+
+    // 胸口 LED（映射 set_led）
+    const bar = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.22, 0.05), matGlow);
+    bar.position.set(0, 1.66, 0.245);
+    g.add(bar);
+
+    const light = new THREE.PointLight(0x3ddc97, 0.9, 7);
+    light.position.set(0, 1.66, 0.4);
+    g.add(light);
+
+    // 肩 + 手臂（可摆动）
+    const armList = [];
+    [-1, 1].forEach(side => {
+      const shoulder = new THREE.Mesh(new THREE.SphereGeometry(0.14, 14, 14), matJoint);
+      shoulder.position.set(side * 0.46, 1.9, 0);
+      shoulder.castShadow = true;
+      g.add(shoulder);
+
+      // 手臂挂在肩关节组上，绕肩旋转才自然
+      const armPivot = new THREE.Group();
+      armPivot.position.set(side * 0.46, 1.9, 0);
+      g.add(armPivot);
+
+      const upper = new THREE.Mesh(new THREE.CylinderGeometry(0.085, 0.075, 0.46, 12), matArmor);
+      upper.position.y = -0.26;
+      upper.castShadow = true;
+      armPivot.add(upper);
+
+      const elbow = new THREE.Mesh(new THREE.SphereGeometry(0.09, 12, 12), matJoint);
+      elbow.position.y = -0.5;
+      armPivot.add(elbow);
+
+      const fore = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.06, 0.42, 12), matArmor);
+      fore.position.y = -0.73;
+      fore.castShadow = true;
+      armPivot.add(fore);
+
+      const hand = new THREE.Mesh(new THREE.BoxGeometry(0.13, 0.16, 0.1), matJoint);
+      hand.position.y = -0.98;
+      hand.castShadow = true;
+      armPivot.add(hand);
+
+      // 记录左右侧，动画时做对称摆臂
+      armPivot.userData.side = side;
+      armList.push(armPivot);
+    });
+
+    // 腿（可摆动）
+    const legList = [];
+    [-1, 1].forEach(side => {
+      const hipPivot = new THREE.Group();
+      hipPivot.position.set(side * 0.19, 0.98, 0);
+      g.add(hipPivot);
+
+      // 腿长按 枢轴0.98 → 脚底0 分配：大腿 0.24 段、小腿 0.22 段、脚 0.1
+      // 之前的腿一直伸到 -1.04，脚就穿到地板下面去了。
+      const thigh = new THREE.Mesh(new THREE.CylinderGeometry(0.105, 0.09, 0.44, 12), matArmor);
+      thigh.position.y = -0.24;
+      thigh.castShadow = true;
+      hipPivot.add(thigh);
+
+      const knee = new THREE.Mesh(new THREE.SphereGeometry(0.1, 12, 12), matJoint);
+      knee.position.y = -0.48;
+      hipPivot.add(knee);
+
+      const shin = new THREE.Mesh(new THREE.CylinderGeometry(0.085, 0.075, 0.36, 12), matArmor);
+      shin.position.y = -0.68;
+      shin.castShadow = true;
+      hipPivot.add(shin);
+
+      // 脚底落在 y=0：枢轴 0.98 − 脚中心 0.93 − 半厚 0.05 ≈ 0
+      const foot = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.1, 0.34), matPlate);
+      foot.position.set(0, -0.93, 0.06);
+      foot.castShadow = true;
+      hipPivot.add(foot);
+
+      hipPivot.userData.side = side;
+      legList.push(hipPivot);
+    });
+
+    // 颈 + 头（作为可转动的"云台"）
+    const tur = new THREE.Group();
+    tur.position.set(0, 2.06, 0);
+    g.add(tur);
+
+    const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.09, 0.14, 12), matJoint);
+    neck.position.y = 0.05;
+    tur.add(neck);
+
+    const headGeo = new THREE.SphereGeometry(0.24, 20, 18);
+    const head = new THREE.Mesh(headGeo, matArmor);
+    head.position.y = 0.3;
+    head.scale.set(1, 1.06, 0.94);
+    head.castShadow = true;
+    tur.add(head);
+
+    // 面罩（深色，衬托眼睛）
+    const visor = new THREE.Mesh(new THREE.SphereGeometry(0.215, 20, 14, 0, Math.PI * 2, 0, Math.PI * 0.52), matPlate);
+    visor.position.set(0, 0.3, 0.05);
+    visor.rotation.x = Math.PI * 0.5;
+    tur.add(visor);
+
+    // 眼睛
+    const es = [];
+    [-0.085, 0.085].forEach(x => {
+      const e = new THREE.Mesh(new THREE.SphereGeometry(0.042, 14, 14), matEye.clone());
+      e.position.set(x, 0.32, 0.2);
+      tur.add(e);
+      es.push(e);
+    });
+
+    // 天线（头顶）
+    const ant = new THREE.Mesh(new THREE.CylinderGeometry(0.013, 0.013, 0.3, 8), matPlate);
+    ant.position.set(0.12, 0.62, -0.04);
+    tur.add(ant);
+    const antTip = new THREE.Mesh(new THREE.SphereGeometry(0.038, 10, 10), matGlow.clone());
+    antTip.position.set(0.12, 0.78, -0.04);
+    tur.add(antTip);
+
+    // 注意力光锥从眼部发出
+    const spot = new THREE.SpotLight(0x3ddc97, 1.4, 12, Math.PI / 7, 0.6);
+    spot.position.set(0, 0.32, 0.22);
+    spot.target.position.set(0, 0.1, 6);
+    tur.add(spot);
+    tur.add(spot.target);
+
+    return {
+      group: g, wheels: [], turret: tur, antenna: ant, eyes: es,
+      ledBar: bar, ledLight: light, headLight: spot,
+      arms: armList, legs: legList,
+    };
+  }
+
+  // ── 模型实例与切换 ──
+  let currentModel = null;
+  let modelKind = "rover";
+
+  // 模型整体放大倍数。
+  // 用 scale 而不是逐个改尺寸：比例、轮径、脚底贴合位置都保持不变，
+  // 改动最小且不会引入新的穿模。
+  const MODEL_SCALE = 1.65;
+
+  function applyModel(parts) {
+    robot.clear();
+    robot.add(parts.group);
+    robot.scale.setScalar(MODEL_SCALE);
+    currentModel = parts;
+    wheels = parts.wheels;
+    turret = parts.turret;
+    antenna = parts.antenna;
+    eyes = parts.eyes;
+    ledBar = parts.ledBar;
+    ledLight = parts.ledLight;
+    headLight = parts.headLight;
+    arms = parts.arms || [];
+    legs = parts.legs || [];
+    // 材质颜色由当前 LED 状态决定，切换后立即同步
+    const glowMats = [matGlow];
+    glowMats.forEach(m => m.color.setHex(state.ledColor));
+  }
+
+  function switchModel(kind) {
+    if (kind === modelKind && currentModel) return;
+    modelKind = kind;
+    applyModel(kind === "humanoid" ? buildHumanoid() : buildRover());
+  }
+
+  // 首次构建放在 state 定义之后（applyModel 会读取 state.ledColor）
 
   // ── 访客（person_approach 时出现） ──
   // 注意：CapsuleGeometry 直到 r140 才引入，r128 没有，直接用圆柱体。
   const visitor = new THREE.Group();
   const vBody = new THREE.Mesh(
     new THREE.CylinderGeometry(0.26, 0.3, 1.15, 12),
-    new THREE.MeshStandardMaterial({ color: 0x2b3648, roughness: 0.7, metalness: 0.2 })
+    new THREE.MeshStandardMaterial({ color: 0x44536e, roughness: 0.72, metalness: 0.15 })
   );
   vBody.position.y = 0.78;
   vBody.castShadow = true;
   visitor.add(vBody);
   const vHead = new THREE.Mesh(
     new THREE.SphereGeometry(0.2, 14, 14),
-    new THREE.MeshStandardMaterial({ color: 0x3a4759, roughness: 0.6 })
+    new THREE.MeshStandardMaterial({ color: 0x5a6b88, roughness: 0.62, metalness: 0.1 })
   );
   vHead.position.y = 1.56;
   vHead.castShadow = true;
@@ -845,20 +1193,65 @@ const viewport = (function initViewport() {
     light: 0.5, tilt: 0, battery: 100, temp: 37,
     ledColor: 0x3ddc97, ledPattern: "solid", ledUntil: 0,
     personVisible: false, personTimer: 0,
-    expr: "neutral", speed: 0, moving: false,
+    expr: "neutral",
+    // 运动：moving 期间按 heading 以 speed 前进，直到 targetDist 走完
+    moving: false, speed: 0.4, heading: 0, targetDist: 0, movedDist: 0,
     targetTilt: 0, camMode: "TP",
   };
 
+  // 首次构建模型（此后由 switchModel 切换）
+  applyModel(buildRover());
+
+  // 场地半径：机器人保持在网格内，撞到边界就停下
+  const BOUND = 17;
+  const worldOffset = new THREE.Vector3();   // 机器人位移量，供相机跟随
+
   let t = 0;
+  let wheelSpin = 0;   // 轮子累计转角
 
   // ── 相机 ──
+  // 机位按放大后的模型尺寸预设（MODEL_SCALE 1.65）
   const camTargets = {
-    TP:  { pos: new THREE.Vector3(4.2, 3.4, 5.2), look: new THREE.Vector3(0, 0.9, 0) },
-    FP:  { pos: new THREE.Vector3(0, 1.35, 0.45), look: new THREE.Vector3(0, 1.1, 6) },
-    TOP: { pos: new THREE.Vector3(0, 8.5, 0.01), look: new THREE.Vector3(0, 0, 0) },
+    TP:  { pos: new THREE.Vector3(6.0, 4.6, 7.2), look: new THREE.Vector3(0, 1.5, 0) },
+    FP:  { pos: new THREE.Vector3(0, 2.2, 0.6),  look: new THREE.Vector3(0, 1.8, 8) },
+    TOP: { pos: new THREE.Vector3(0, 12.0, 0.01), look: new THREE.Vector3(0, 0, 0) },
   };
   const camPos = camTargets.TP.pos.clone();
   const camLook = camTargets.TP.look.clone();
+  const desiredPos = new THREE.Vector3();
+  const desiredLook = new THREE.Vector3();
+
+  // ── 鼠标轨道控制 ──
+  // 不引入 OrbitControls：它会直接接管 camera.position/lookAt，
+  // 与上面的平滑跟随、机位切换互相打架。这里只维护 yaw/pitch/dist
+  // 三个偏移量，最终位置仍由渲染循环统一计算，两者可以共存。
+  const orbit = {
+    yaw: 0,             // 水平环绕角（相对预设机位）
+    pitch: 0,           // 俯仰偏移
+    dist: 1,            // 距离倍率
+    dragging: false,
+    lastX: 0,
+    lastY: 0,
+    // 预设机位对应的基础角度，切换机位时重算
+    baseYaw: Math.atan2(camTargets.TP.pos.x, camTargets.TP.pos.z),
+    basePitch: Math.atan2(
+      camTargets.TP.pos.y - camTargets.TP.look.y,
+      Math.hypot(camTargets.TP.pos.x, camTargets.TP.pos.z)
+    ),
+  };
+
+  /** 把 orbit 的偏移归零，回到预设机位 */
+  function resetOrbit(camMode) {
+    const c = camTargets[camMode];
+    orbit.baseYaw = Math.atan2(c.pos.x, c.pos.z);
+    orbit.basePitch = Math.atan2(
+      c.pos.y - c.look.y, Math.hypot(c.pos.x, c.pos.z)
+    );
+    orbit.yaw = orbit.baseYaw;
+    orbit.pitch = Math.max(-1.2, Math.min(1.35, orbit.basePitch));
+    orbit.dist = 1;
+  }
+  resetOrbit("TP");
 
   function resize() {
     const w = viewportEl.clientWidth || 1;
@@ -870,26 +1263,118 @@ const viewport = (function initViewport() {
   const viewportEl = document.getElementById("viewport");
   window.addEventListener("resize", resize);
 
+  // ── 鼠标/触摸交互：拖拽旋转、滚轮缩放 ──
+  function onPointerDown(e) {
+    // 只响应左键；右键留给浏览器菜单
+    if (e.button !== undefined && e.button !== 0) return;
+    orbit.dragging = true;
+    orbit.lastX = e.clientX;
+    orbit.lastY = e.clientY;
+    viewportEl.style.cursor = "grabbing";
+    // 捕获指针：拖到画布外也能继续转
+    if (e.pointerId !== undefined && viewportEl.setPointerCapture) {
+      try { viewportEl.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+    }
+  }
+
+  function onPointerMove(e) {
+    if (!orbit.dragging) return;
+    const dx = e.clientX - orbit.lastX;
+    const dy = e.clientY - orbit.lastY;
+    orbit.lastX = e.clientX;
+    orbit.lastY = e.clientY;
+
+    // 灵敏度：横向 0.008 弧度/像素，纵向略低避免抖动
+    orbit.yaw -= dx * 0.008;
+    orbit.pitch = Math.max(-0.35, Math.min(1.35, orbit.pitch + dy * 0.006));
+    e.preventDefault();
+  }
+
+  function onPointerUp(e) {
+    if (!orbit.dragging) return;
+    orbit.dragging = false;
+    viewportEl.style.cursor = "grab";
+    if (e.pointerId !== undefined && viewportEl.releasePointerCapture) {
+      try { viewportEl.releasePointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+    }
+  }
+
+  function onWheel(e) {
+    // 缩放：0.88 ~ 2.6 倍，防止穿模或跑太远
+    orbit.dist = Math.max(0.55, Math.min(2.6, orbit.dist * (1 + Math.sign(e.deltaY) * 0.1)));
+    e.preventDefault();
+  }
+
+  viewportEl.style.cursor = "grab";
+  viewportEl.style.touchAction = "none";   // 触摸设备上禁用默认滚动
+  viewportEl.addEventListener("pointerdown", onPointerDown);
+  window.addEventListener("pointermove", onPointerMove);
+  window.addEventListener("pointerup", onPointerUp);
+  viewportEl.addEventListener("wheel", onWheel, { passive: false });
+  // 双击复位到预设机位
+  viewportEl.addEventListener("dblclick", () => resetOrbit(state.camMode));
+
   // ── 主循环 ──
   function animate() {
     requestAnimationFrame(animate);
     t += 0.016;
 
-    // 相机平滑跟随
-    const target = camTargets[state.camMode];
-    const k = state.camMode === "FP" ? 0.5 : 0.08;
-    camPos.lerp(target.pos, k);
-    camLook.lerp(target.look, k);
+    // 相机：预设机位 + 鼠标轨道偏移
+    const base = camTargets[state.camMode];
+    const px = robot.position.x, pz = robot.position.z;
+
+    // 以机器人中心为轨道中心
+    const pivotX = px, pivotY = base.look.y, pivotZ = pz;
+
+    // 由 yaw/pitch/dist 球面坐标算相机位置（以机器人为中心）
+    const baseDist = Math.hypot(
+      base.pos.x, base.pos.y - base.look.y, base.pos.z
+    );
+    const dist = baseDist * orbit.dist;
+    const cosP = Math.cos(orbit.pitch);
+
+    desiredPos.set(
+      pivotX + Math.sin(orbit.yaw) * cosP * dist,
+      pivotY + Math.sin(orbit.pitch) * dist,
+      pivotZ + Math.cos(orbit.yaw) * cosP * dist
+    );
+    desiredLook.set(pivotX, pivotY, pivotZ);
+
+    const k = state.camMode === "FP" ? 0.5 : 0.12;
+    camPos.lerp(desiredPos, k);
+    camLook.lerp(desiredLook, k);
     camera.position.copy(camPos);
     camera.position.y += Math.sin(t * 1.6) * 0.012;   // 轻微呼吸
     camera.lookAt(camLook);
 
     // 车身倾斜（映射 imu_tilt_deg）
     robot.rotation.z += ((state.targetTilt * Math.PI / 180) - robot.rotation.z) * 0.12;
-    // 云台缓慢扫视
-    turret.rotation.y = Math.sin(t * 0.42) * 0.45;
+    // 朝向：移动时转到 heading，停下后保持（不是每次都强行回正）
+    if (state.moving) {
+      let diff = state.heading - robot.rotation.y;
+      // 归一化到 [-π, π]，走最短路径
+      while (diff > Math.PI) diff -= Math.PI * 2;
+      while (diff < -Math.PI) diff += Math.PI * 2;
+      robot.rotation.y += diff * 0.15;
+    }
+    // 云台/头部缓慢扫视（两种模型都适用）
+    if (turret) turret.rotation.y = Math.sin(t * 0.42) * 0.45;
     // 天线轻晃
-    antenna.rotation.z = Math.sin(t * 2.1) * 0.09;
+    if (antenna) antenna.rotation.z = Math.sin(t * 2.1) * 0.09;
+
+    // 人形：行走时摆臂摆腿，静止时轻微呼吸
+    if (arms.length || legs.length) {
+      if (state.moving) {
+        const gait = t * 7.5;
+        legs.forEach(p => { p.rotation.x = Math.sin(gait + (p.userData.side > 0 ? Math.PI : 0)) * 0.55; });
+        // 手臂与对侧腿同步（人类步态）
+        arms.forEach(p => { p.rotation.x = Math.sin(gait + (p.userData.side > 0 ? 0 : Math.PI)) * 0.42; });
+      } else {
+        const idle = Math.sin(t * 1.1) * 0.045;
+        legs.forEach(p => { p.rotation.x += (0 - p.rotation.x) * 0.12; });
+        arms.forEach(p => { p.rotation.x += (idle - p.rotation.x) * 0.08; });
+      }
+    }
 
     // LED 闪烁
     const ledActive = performance.now() < state.ledUntil;
@@ -907,7 +1392,9 @@ const viewport = (function initViewport() {
     }
     matGlow.color.setHex(state.ledColor);
     matGlow.color.multiplyScalar(ledVisible === true ? 1 : (ledVisible === false ? 0.06 : ledVisible));
-    ledLight.intensity = (ledVisible === true ? 1.1 : (ledVisible === false ? 0.05 : ledVisible * 1.1));
+    if (ledLight) {
+      ledLight.intensity = (ledVisible === true ? 1.1 : (ledVisible === false ? 0.05 : ledVisible * 1.1));
+    }
 
     // 眼睛亮度随电量；低于 20% 转红闪烁
     const lowBat = state.battery < 20;
@@ -917,8 +1404,10 @@ const viewport = (function initViewport() {
       e.material.color.setHex(eyeHex);
       e.material.color.multiplyScalar(eyePulse);
     });
-    headLight.color.setHex(eyeHex);
-    headLight.intensity = 0.5 + eyePulse * 1.1;
+    if (headLight) {
+      headLight.color.setHex(eyeHex);
+      headLight.intensity = 0.5 + eyePulse * 1.1;
+    }
 
     // 表情：调整眼的纵向缩放
     const eyeScaleY = state.expr === "happy" ? 0.45
@@ -927,9 +1416,37 @@ const viewport = (function initViewport() {
                     : state.expr === "sad" ? 0.6 : 1.0;
     eyes.forEach(e => { e.scale.y += (eyeScaleY - e.scale.y) * 0.15; });
 
-    // 移动时轮子转动、车身轻微上下颠
-    const spin = state.moving ? t * 9 : 0;
-    wheels.forEach(w => { w.rotation.x = spin; });
+    // ── 真实位移 ──
+    // 之前只做了车身起伏（position.y），机器人其实原地不动，看起来像"抖了几下"。
+    // 现在按 heading 推进，走满 targetDist 或碰到边界才停。
+    if (state.moving) {
+      // 速度映射：speed 0..1 → 每秒 1.2..4.2 个单位
+      const v = (1.2 + state.speed * 3.0) * 0.016;
+      const step = Math.min(v, Math.max(0, state.targetDist - state.movedDist));
+
+      const dx = Math.sin(state.heading) * step;
+      const dz = Math.cos(state.heading) * step;
+
+      const nx = robot.position.x + dx;
+      const nz = robot.position.z + dz;
+      const outOfBound = Math.hypot(nx, nz) > BOUND;
+
+      if (step <= 0.0001 || outOfBound) {
+        state.moving = false;             // 走完或撞到边界
+      } else {
+        robot.position.x = nx;
+        robot.position.z = nz;
+        state.movedDist += step;
+        worldOffset.set(dx, 0, dz);
+      }
+    }
+
+    // 轮子：移动时按实际位移滚动，停下后逐渐静止
+    const spinRate = state.moving ? (1.2 + state.speed * 3.0) * 2.2 : 0;
+    wheelSpin += spinRate * 0.016;
+    wheels.forEach(w => { w.rotation.x = wheelSpin; });
+
+    // 车身起伏只在移动时出现
     robot.position.y = state.moving ? Math.abs(Math.sin(t * 11)) * 0.035 : 0;
 
     // 访客淡入淡出
@@ -942,15 +1459,29 @@ const viewport = (function initViewport() {
       if (visitor.position.y < -2) visitor.visible = false;
     }
 
-    // 环境光映射：光照 0→几乎全暗，1→明亮
+    // 环境光映射。
+    // 昼夜变化仍然保留（能看出"天黑了"），但把下限抬高：
+    // 这是观察窗口，夜间也要看得清机器人，不能真给一片黑。
+    // 之前的映射在 L=0.02 时几乎全暗，这正是"3D 环境太暗"的原因。
     const L = Math.max(0.02, Math.min(1, state.light));
-    ambient.intensity = 0.12 + 0.62 * L;
-    hemi.intensity = 0.1 + 0.45 * L;
-    keyLight.intensity = 0.15 + 1.35 * L;
-    // 色温：白天偏冷白，夜晚偏蓝
-    const warm = 0.55 + 0.45 * L;
+    const ease = 0.45 + 0.55 * L;      // 把 0..1 压到 0.45..1，保留对比但不至于黑
+
+    ambient.intensity = 0.55 + 0.55 * ease;
+    hemi.intensity = 0.5 + 0.45 * ease;
+    keyLight.intensity = 1.05 + 1.05 * ease;
+
+    // 色温：白天偏冷白，夜晚偏蓝但仍保持亮度
+    const warm = 0.72 + 0.28 * L;
     keyLight.color.setRGB(warm, warm, 1.0);
-    scene.background.setRGB(0.028 * (0.4 + L), 0.035 * (0.5 + L), 0.055 * (0.7 + L));
+
+    // 背景：夜晚是深蓝灰，而不是纯黑
+    scene.background.setRGB(
+      0.045 + 0.030 * L,
+      0.055 + 0.040 * L,
+      0.080 + 0.055 * L
+    );
+    // 雾调淡一些，否则远处网格全部糊成黑色
+    if (scene.fog) scene.fog.density = 0.0075;
 
     renderer.render(scene, camera);
   }
@@ -985,14 +1516,60 @@ const viewport = (function initViewport() {
     },
     setPerson(on) { state.personVisible = !!on; },
     setExpression(name) { if (name) state.expr = name; },
-    setMotion(moving) { state.moving = !!moving; },
-    setCamera(mode) { if (camTargets[mode]) state.camMode = mode; },
+    /**
+     * 执行一次移动。
+     * @param {object} opt {direction, speed, distanceCm}
+     * 方向映射到 heading（弧度），机器人朝该方向平移指定距离。
+     */
+    setMotion(opt) {
+      const o = opt || {};
+      // 方向 → 朝向角。0 弧度朝 +Z（画面前方），顺时针为正
+      const DIR = {
+        forward: 0, backward: Math.PI,
+        left: -Math.PI / 2, right: Math.PI / 2,
+        turn_left: -Math.PI / 2, turn_right: Math.PI / 2,
+      };
+      const dir = (o.direction || "forward").toLowerCase();
+      state.heading = DIR[dir] !== undefined ? DIR[dir] : 0;
+
+      // speed 0..1（缺省 0.4）
+      state.speed = Math.max(0, Math.min(1, o.speed != null ? Number(o.speed) : 0.4));
+
+      // 距离：后端以厘米给出，1 单位 = 20cm，限制在合理范围
+      const cm = o.distanceCm != null ? Number(o.distanceCm) : 30;
+      state.targetDist = Math.max(0.3, Math.min(12, cm / 20));
+      state.movedDist = 0;
+
+      // 转向：车身也朝向移动方向（仅左右时改变朝向观感）
+      state.moving = true;
+    },
+    setCamera(mode) {
+      if (!camTargets[mode]) return;
+      state.camMode = mode;
+      resetOrbit(mode);      // 切机位时回到该机位的标准视角
+    },
+    /** 切换机器人形态：'rover'（轮式小车）或 'humanoid'（人形） */
+    setModel(kind) {
+      if (kind !== "rover" && kind !== "humanoid") return;
+      switchModel(kind);
+      // 人形比小车高约 2.4 个单位（已含 MODEL_SCALE），取景点相应上抬
+      const h = kind === "humanoid" ? 2.4 : 0;
+      camTargets.TP.pos.set(6.0, 4.6 + h * 0.35, 7.2);
+      camTargets.TP.look.set(0, 1.5 + h, 0);
+      camTargets.FP.pos.set(0, 2.2 + h, 0.6);
+      camTargets.FP.look.set(0, 1.8 + h, 8);
+      camTargets.TOP.pos.set(0, 12.0 + h * 0.5, 0.01);
+      camTargets.TOP.look.set(0, 0, 0);
+      resetOrbit(state.camMode);   // 模型尺寸变了，视角基准同步更新
+    },
   };
 })();
 
 document.getElementById("camTP").onclick  = () => viewport.setCamera("TP");
 document.getElementById("camFP").onclick  = () => viewport.setCamera("FP");
 document.getElementById("camTOP").onclick = () => viewport.setCamera("TOP");
+
+// ── 模型切换按钮：绑定放在 store 定义之后（见文件下方 initModelButtons）──
 
 // ───────── 世界输入（animat/sensor/*）─────────
 const envlogBox = document.getElementById("envlogBox");
@@ -1228,11 +1805,18 @@ function onMessage(topic, payload) {
   if (topic === TOPIC.MOTOR) {
     const cmd = data.command || "?";
     const params = data.params || {};
-    // 移动指令驱动 3D 轮子与车身起伏
+    // 移动指令：参数有两种来源，必须都兼容
+    //   1) LLM 工具 move：扁平结构 {command, direction, speed, distance_cm}
+    //   2) 意图动作树：嵌套结构 {command, params:{...}}
     if (cmd === "move") {
-      viewport.setMotion(true);
-      clearTimeout(window.__moveTimer);
-      window.__moveTimer = setTimeout(() => viewport.setMotion(false), 1600);
+      viewport.setMotion({
+        direction: data.direction ?? params.direction,
+        speed: data.speed ?? params.speed,
+        distanceCm: data.distance_cm ?? params.distance_cm,
+      });
+      const d = data.direction ?? params.direction ?? "forward";
+      const cm = data.distance_cm ?? params.distance_cm ?? 30;
+      log("🚗 移动: " + d + " " + cm + "cm", "motor");
     }
     if (cmd === "speak") {
       // 只有真正说出口的话才进对话窗口。空文本（独白被静默）直接忽略，
@@ -1357,6 +1941,59 @@ const store = (function probeStorage() {
   }
 })();
 
+// ───────── 侧边栏整体收缩 ─────────
+// 收起后只留 38px 窄轨，主区获得更大空间，适合专注看意识流 / 3D 视口。
+(function initSidebarCollapse() {
+  const SIDE_KEY = "animat_sidebar_collapsed";
+  const layout = document.getElementById("layout");
+  const btnToggle = document.getElementById("sideToggle");
+  const btnExpand = document.getElementById("sideExpand");
+  if (!layout || !btnToggle || !btnExpand) return;
+
+  function apply(collapsed) {
+    layout.classList.toggle("side-collapsed", collapsed);
+    // 侧边栏宽度变了，3D canvas 需要重算尺寸
+    window.dispatchEvent(new Event("resize"));
+  }
+
+  btnToggle.onclick = () => {
+    apply(true);
+    store.set(SIDE_KEY, "1");
+  };
+  btnExpand.onclick = () => {
+    apply(false);
+    store.set(SIDE_KEY, "0");
+  };
+
+  // 恢复上次状态
+  apply(store.get(SIDE_KEY) === "1");
+})();
+
+// ───────── 机器人模型切换 ─────────
+// 必须放在 store 定义之后：const 声明在初始化前访问会抛 TDZ 错误
+(function initModelButtons() {
+  const MODEL_KEY = "animat_robot_model";
+  const btnRover = document.getElementById("modelRover");
+  const btnHuman = document.getElementById("modelHuman");
+  if (!btnRover || !btnHuman) return;
+
+  function select(kind, persist) {
+    viewport.setModel(kind);
+    btnRover.classList.toggle("sec-active", kind === "rover");
+    btnHuman.classList.toggle("sec-active", kind === "humanoid");
+    btnRover.classList.toggle("sec", kind !== "rover");
+    btnHuman.classList.toggle("sec", kind !== "humanoid");
+    if (persist) store.set(MODEL_KEY, kind);
+  }
+
+  btnRover.onclick = () => select("rover", true);
+  btnHuman.onclick = () => select("humanoid", true);
+
+  // 恢复上次选择
+  const saved = store.get(MODEL_KEY);
+  select(saved === "humanoid" ? "humanoid" : "rover", false);
+})();
+
 // ───────── 显示模式：白天 / 夜晚 / 跟随系统 ─────────
 const MODE_KEY = "animat_display_mode";
 const MODES = ["auto", "light", "dark"];
@@ -1426,13 +2063,87 @@ document.getElementById("chat").addEventListener("keydown", (e) => {
   if (e.key === "Enter") sendChat();
 });
 
-// 事件日志折叠
+// ───────── 统一折叠逻辑 ─────────
+// 侧边栏分区、3D 视口、对话/意识流面板、事件日志都用同一套交互：
+// 点标题收起/展开，箭头旋转，状态记入 localStorage（存储被拦截时自动降级）。
+const COLLAPSE_KEY = "animat_collapsed_panels";
+
+function loadCollapsed() {
+  try {
+    const raw = store.get(COLLAPSE_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch (e) { return {}; }
+}
+function saveCollapsed(map) {
+  try { store.set(COLLAPSE_KEY, JSON.stringify(map)); } catch (e) { /* ignore */ }
+}
+
+const collapsedMap = loadCollapsed();
+
+/**
+ * 给一个元素绑定折叠开关。
+ * @param {string} key      持久化用的标识
+ * @param {HTMLElement} box 需要加/去 collapsed 类的容器
+ * @param {HTMLElement} head 点击区域
+ * @param {Function} [onToggle] 展开后回调（例如 3D 需要重新计算尺寸）
+ */
+function bindCollapse(key, box, head, onToggle) {
+  if (!box || !head) return;
+
+  const apply = (collapsed) => {
+    box.classList.toggle("collapsed", collapsed);
+    if (!collapsed && typeof onToggle === "function") onToggle();
+  };
+
+  // 恢复上次状态
+  apply(!!collapsedMap[key]);
+
+  head.addEventListener("click", (e) => {
+    // 标题里的按钮（如相机切换）不触发折叠
+    if (e.target.closest("button")) return;
+    const next = !box.classList.contains("collapsed");
+    apply(next);
+    collapsedMap[key] = next;
+    saveCollapsed(collapsedMap);
+  });
+}
+
+// 侧边栏三个分区
+document.querySelectorAll(".section").forEach((sec, i) => {
+  const head = sec.querySelector("h2");
+  if (!head) return;
+  const key = "sec_" + (head.textContent || i).trim().replace(/[^\w\u4e00-\u9fa5]/g, "");
+  bindCollapse(key, sec, head);
+});
+
+// 3D 视口（展开时重算尺寸，否则 canvas 变 0）
+bindCollapse("viewport", document.getElementById("vpWrap"),
+  document.getElementById("vpH"), () => window.dispatchEvent(new Event("resize")));
+
+// 对话与意识流面板
+bindCollapse("pane_chat", document.getElementById("paneChat"),
+  document.getElementById("chatHeadBtn"));
+bindCollapse("pane_thought", document.getElementById("paneThought"),
+  document.getElementById("thoughtHeadBtn"));
+
+// 事件日志：标题右侧的展开/收起文案随状态同步
 const eventsBox = document.getElementById("eventsBox");
-document.getElementById("eventsHead").onclick = () => {
-  eventsBox.classList.toggle("collapsed");
-  document.getElementById("eventsToggle").textContent =
+const eventsToggle = document.getElementById("eventsToggle");
+const eventsHead = document.getElementById("eventsHead");
+
+function syncEventsToggle() {
+  if (!eventsToggle || !eventsBox) return;
+  eventsToggle.textContent =
     eventsBox.classList.contains("collapsed") ? "展开 ▸" : "收起 ▾";
-};
+}
+
+bindCollapse("events", eventsBox, eventsHead, syncEventsToggle);
+
+// 初始化文案。bindCollapse 只回调"展开"，这里补一次，保证首次加载也正确
+if (eventsHead) {
+  eventsHead.addEventListener("click", () => setTimeout(syncEventsToggle, 0));
+  syncEventsToggle();
+}
 
 log("网页客户端就绪。点击「连接」开始。内感与世界事件由 env_simulator 提供。", "sys");
 </script>

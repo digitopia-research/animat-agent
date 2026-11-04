@@ -88,6 +88,17 @@ DIALOGUE_SYSTEM_PROMPT = """\
 5. 不要输出 Markdown、标题或列表。
 6. 你的身体状态只能来自下方"当前状态"。不要编造未列出的传感器、
    故障或身体异常（如"系统过热""温度报警"），也不要夸大危险。
+7. 动作必须真的执行，不能只是嘴上说。一旦你打算做任何身体动作
+   （开灯、移动、做表情、做手势、上网查东西），必须在本轮调用
+   对应的工具，而不是只用文字描述"我现在去开灯""我要往前走"。
+   文字只用来告诉对方结果，不要用它代替动作。
+   如果你已经决定要做，就调用工具；如果不打算做，就不要说你要做。
+
+输出格式（严格两部分）:
+第一行写这一轮的状态标记，二选一：
+  <did>action</did>   你确实调用了工具，或这轮不需要任何动作
+  <did>claim</did>    你嘴上说了要做一个动作，但本轮没有调用工具
+第二行开始写你对对方说的话（1-3 句口语）。
 
 当前状态:
 {body_context}
@@ -128,15 +139,36 @@ def _parse_intent(text: str, default: str = "none") -> tuple[str, str]:
     return intent, body.strip()
 
 
+# 模型按 prompt 要求输出 <did>action</did> 或 <did>claim</did>，自评这一轮
+# 是否"只说不做"。由模型判断而不是代码猜关键词：声称动作的说法千变万化，
+# 任何词表都会漏，且换语言直接失效。
+_DID_RE = re.compile(r"<\s*did\s*>\s*(action|claim)\s*<\s*/\s*did\s*>", re.IGNORECASE)
+
+
+def _parse_did_marker(text: str) -> tuple[bool, str]:
+    """解析 <did> 标记。
+
+    返回 (模型是否自认"只说不做", 去掉标记后的正文)。
+    标记缺失时返回 (False, 原文)——没有标记就不补救，避免误伤。
+    """
+    if not text:
+        return False, text
+    m = _DID_RE.search(text)
+    claims_only = bool(m) and m.group(1).lower() == "claim"
+    body = _DID_RE.sub("", text).strip()
+    return claims_only, body
+
+
 def _sanitize_output(text: str) -> str:
     """清洗要对外发送的文本：
 
     1. 去掉 "[T+630.3s] 内部想法:" 这类调试前缀（模型从传感器上下文模仿而来）
     2. 去掉 *轻轻转动头部* 这类肢体动作描写
-    3. 去掉残留的 <intent> 标签
+    3. 去掉残留的 <intent> / <did> 标签
     """
     if not text:
         return ""
+    text = _DID_RE.sub("", text)
     text = _INTENT_RE.sub("", text)
     text = _DEBUG_PREFIX_RE.sub("", text)
     text = _ACTION_DESC_RE.sub("", text)
@@ -162,12 +194,15 @@ class StreamCortex:
     THINK_INTERVAL_SEC = 3.0        # 思维间隔(秒)
     THINK_INTERVAL_IDLE = 5.0       # 安静时的思维间隔
     THINK_INTERVAL_DRIVEN = 1.5     # 高驱力时思维加速
-    # 每个思维的最大 token 数。
-    # 注意: 过小会导致模型"还没说完正文就耗尽预算"(finish_reason=length，
-    # 内容被截断甚至为空)。实测中文回答需 >=500 才稳定收尾，故默认 512。
-    # 开启工具调用后还需额外空间生成 <tool_call> JSON，故提高到 768。
-    # 可用 ANIMAT_MAX_THINK_TOKENS 覆盖。
-    MAX_THINK_TOKENS = int(os.getenv("ANIMAT_MAX_THINK_TOKENS", "768"))
+    # 自发思维的最大 token 数。
+    # 独白本来就短（实测 50-150 token 就收尾），原来统一给 768 是浪费：
+    # 14B 在 5060 Ti 上约 28 tok/s，多给的预算直接体现为等待时间。
+    MAX_THINK_TOKENS = int(os.getenv("ANIMAT_MAX_THINK_TOKENS", "256"))
+
+    # 对话回复的 token 预算。
+    # 对话要完整回答，且可能触发工具调用（需要额外 token 生成 <tool_call> JSON），
+    # 所以给得比独白宽。可用 ANIMAT_MAX_REPLY_TOKENS 覆盖。
+    MAX_REPLY_TOKENS = int(os.getenv("ANIMAT_MAX_REPLY_TOKENS", "512"))
 
     # 工具结果回注的预算。搜索结果动辄上千字，无限制回注会撑爆 n_ctx。
     TOOL_RESULT_MAX_CHARS = 600      # 单条上限
@@ -216,6 +251,8 @@ class StreamCortex:
 
         # 对话记忆（外部输入）
         self._pending_external_text: Optional[str] = None
+        # 外部输入入队时刻，用于统计排队延迟
+        self._pending_external_at: float = 0.0
         self._external_text_lock = asyncio.Lock()
 
         # 统计
@@ -280,14 +317,37 @@ class StreamCortex:
             if time.time() < self._context_fail_cooldown:
                 await asyncio.sleep(1.0)
                 continue
+
+            # 等待间隔由 _interruptible_sleep 执行，可被外部输入打断。
+            # 之前 sleep 写在 _think_cycle 内部，用户说完话必须等当前
+            # 轮次 + 整个间隔跑完才被处理，实测排队 7-9 秒。
+            wait_sec = 2.0
             try:
-                await self._think_cycle()
+                wait_sec = await self._think_cycle() or 2.0
             except Exception:
                 # 单个思维周期失败（多为 MQTT 瞬断重连期间的发布异常）不应杀死
                 # 整条意识流——神经层会自动重连，这里退避后继续即可。
                 logger.warning("StreamCortex cycle error (resuming)", exc_info=True)
                 await asyncio.sleep(1.0)
+                continue
+
+            # 静默期仍然保留（防止回复后立刻自言自语刷屏），
+            # 但它是可打断的：用户再说话会立刻跳出。
+            await self._interruptible_sleep(wait_sec)
+
         logger.info("StreamCortex stopped")
+
+    async def _interruptible_sleep(self, seconds: float) -> None:
+        """可被外部输入打断的睡眠。
+
+        每 200ms 检查一次待处理输入：用户一说话就提前醒来，
+        把"等间隔走完"的时间省掉。没有输入时行为与普通 sleep 一致。
+        """
+        deadline = time.time() + seconds
+        while self._running and time.time() < deadline:
+            if self._pending_external_text:
+                return                      # 有话说，立刻回去处理
+            await asyncio.sleep(min(0.2, max(0.0, deadline - time.time())))
 
     async def stop(self):
         """停止意识流"""
@@ -330,17 +390,26 @@ class StreamCortex:
             return
         async with self._external_text_lock:
             self._pending_external_text = text
+            # 记录入队时刻，用于测量"用户说完 → 开始处理"的排队延迟
+            self._pending_external_at = time.time()
         logger.info(f"StreamCortex: external speech queued: {text[:40]}")
 
     # ── 主循环 ──
     async def _think_cycle(self):
         """一次完整的思维循环"""
+        cycle_t0 = time.time()
+
         # 1. 检查是否有外部输入
         external_text = None
+        queue_delay = 0.0
         async with self._external_text_lock:
             if self._pending_external_text:
                 external_text = self._pending_external_text
                 self._pending_external_text = None
+                # 用户说完到现在才开始处理，中间隔了多久
+                if self._pending_external_at:
+                    queue_delay = cycle_t0 - self._pending_external_at
+                    self._pending_external_at = 0.0
 
         # 2. 构建上下文
         system_prompt = CONSCIOUSNESS_SYSTEM_PROMPT.format(
@@ -348,6 +417,7 @@ class StreamCortex:
         )
 
         # 3. 产生思维
+        think_t0 = time.time()
         thought = None
         try:
             if external_text:
@@ -358,10 +428,12 @@ class StreamCortex:
                 thought = await self._think_spontaneous(system_prompt)
         except Exception:
             logger.error("Error during think cycle", exc_info=True)
-            return
+            # 明确返回较长间隔：LLM 出错时不要高频重试
+            return 5.0
+        think_ms = (time.time() - think_t0) * 1000
 
         if thought is None:
-            return
+            return 5.0
 
         # 4. 门控评估
         max_drive = self._drive_level
@@ -454,11 +526,27 @@ class StreamCortex:
             wait_sec = self.THINK_INTERVAL_IDLE
         else:
             wait_sec = self.THINK_INTERVAL_SEC
-        
+
         # 引入随机抖动，避免机械节奏
         import random
         wait_sec *= random.uniform(0.8, 1.2)
-        await asyncio.sleep(wait_sec)
+
+        # ── 耗时诊断 ──
+        # 拆成三段看清延迟来源：
+        #   queue  = 用户说完 → 本轮开始处理（排队）
+        #   think  = 一次 LLM 调用的实际耗时
+        #   total  = 本轮从开始到进入睡眠的总时长
+        cycle_ms = (time.time() - cycle_t0) * 1000
+        if external_text or think_ms > 3000:
+            logger.info(
+                "⏱ latency: kind=%s queue=%.2fs think=%.2fs cycle=%.2fs sleep=%.1fs",
+                "external" if external_text else "spontaneous",
+                queue_delay, think_ms / 1000, cycle_ms / 1000, wait_sec,
+            )
+
+        # 睡眠由主循环统一负责，以便被外部输入打断。
+        # 这里只把本轮的间隔需求交回去。
+        return wait_sec
 
     async def _think_spontaneous(self, system_prompt: str) -> Optional[Thought]:
         """产生自发思维"""
@@ -617,7 +705,7 @@ class StreamCortex:
         try:
             response = self.llm.complete(
                 messages=messages,
-                max_tokens=self.MAX_THINK_TOKENS,
+                max_tokens=self.MAX_REPLY_TOKENS,
                 tools=self._enabled_tools(),
             )
             choice = response["choices"][0]
@@ -627,26 +715,70 @@ class StreamCortex:
             logger.error(f"Response think failed: {e}")
             return None
 
-        # 模型在对话里要求调用工具：先执行，再让它基于结果回答
+        # 解析模型的自评标记：<did>claim</did> 表示它承认"嘴上说要动作，
+        # 但这一轮没调工具"。判断交给模型完成，代码不做关键词匹配。
+        claims_only, text = _parse_did_marker(text)
+
+        # 模型自认没做，且确实没有 tool_calls → 补一次强制调用
+        if claims_only and not tool_calls:
+            logger.info("模型自评'只说不做'，强制重试并要求调用工具")
+            messages.append({"role": "assistant", "content": text})
+            messages.append({
+                "role": "system",
+                "content": (
+                    "你标记了 <did>claim</did>，说明你只是说了要做，"
+                    "对方什么也不会看到。现在必须直接调用对应的工具完成这件事，"
+                    "不要再只用文字描述。"
+                ),
+            })
+            try:
+                forced = self.llm.complete(
+                    messages=messages,
+                    max_tokens=self.MAX_REPLY_TOKENS,
+                    tools=self._enabled_tools(),
+                )
+                fc = forced["choices"][0]
+                tool_calls = fc["message"].get("tool_calls") or []
+                if tool_calls:
+                    logger.info("强制重试成功，工具: %s",
+                                [c["function"]["name"] for c in tool_calls])
+                    # 采用重试拿到的正文（通常为空或一句确认）
+                    text = (fc["message"].get("content") or "").strip() or text
+            except Exception as e:
+                logger.warning("强制工具调用重试失败: %s", e)
+
+        # 模型在对话里要求调用工具：先执行，再让它基于结果回答。
+        # 注意这是一轮对话里的第二次 LLM 调用，耗时直接翻倍——
+        # 诊断日志里单独计时，方便判断"工具型回复"慢在哪一段。
         if tool_calls:
+            tool_t0 = time.time()
             await self._execute_tool_calls(tool_calls)
+            tool_ms = (time.time() - tool_t0) * 1000
+
             results = "\n".join(self._tool_results[-2:])
             messages.append({"role": "assistant", "content": "", "tool_calls": tool_calls})
             messages.append({
                 "role": "system",
                 "content": f"工具执行结果如下，请基于它直接用口语回答对方：\n{results}",
             })
+            retry_t0 = time.time()
             try:
                 retry = self.llm.complete(
                     messages=messages,
-                    max_tokens=self.MAX_THINK_TOKENS,
+                    max_tokens=self.MAX_REPLY_TOKENS,
                 )
                 text = (retry["choices"][0]["message"].get("content") or "").strip()
             except Exception as e:
                 logger.error(f"Tool follow-up failed: {e}")
                 text = ""
+            logger.info(
+                "⏱ tool_round: exec=%.2fs followup_llm=%.2fs",
+                tool_ms / 1000, time.time() - retry_t0,
+            )
 
-        # 对话场景必然是对外说话；若模型自带意图标签则剥离，避免混进回复正文
+        # 对话场景必然是对外说话；若模型自带意图/自评标签则剥离，
+        # 避免 <intent>/<did> 混进给用户看的正文（工具后续轮次也可能带出来）。
+        _, text = _parse_did_marker(text)
         _, text = _parse_intent(text, default="call")
         if not text:
             return None
