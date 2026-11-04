@@ -6,16 +6,49 @@
 
 ## 一、模型加载与封装（`animat/llm_backend.py`）
 
-本地模型通过 **`llama-cpp-python`** 加载 GGUF 量化模型（默认 `Qwen2.5-1.5B-Instruct` Q4_K_M，约 1GB，纯 CPU 推理）：
+本地模型通过 **`llama-cpp-python`** 加载 GGUF 量化模型。当前默认部署为
+**`Qwen3-14B-Instruct` Q4_K_M**（约 9GB，全量卸载到 GPU）：
 
 ```python
 self._llm = llama_cpp.Llama(
-    model_path=self.config.model_path,
-    n_ctx=self.config.n_ctx,        # 4096 上下文窗口
-    n_threads=self.config.n_threads, # 8 线程
-    n_gpu_layers=self.config.n_gpu_layers,  # 0 = 纯 CPU
+    model_path=self.config.model_path,   # ANIMAT_MODEL_PATH 指定
+    n_ctx=self.config.n_ctx,             # ANIMAT_N_CTX，默认 4096
+    n_threads=self.config.n_threads,     # 8 线程
+    n_gpu_layers=self.config.n_gpu_layers,  # 99 = 全部卸载到 GPU
     verbose=False,
 )
+```
+
+> **模型选型提示**：1.5B/7B 时代只需要"能聊"，换成 14B 是为了
+> **工具调用（function calling）**——小模型的参数生成基本不可用。
+
+### 一.1 Qwen3 的两个特殊处理
+
+Qwen3 与 Qwen2.5 行为不同，`llm_backend.py` 里做了两处适配：
+
+**① 关闭 thinking 模式**
+
+Qwen3 默认输出 `<think>…</think>` 思考块。本项目需要它直接产出简短动作，
+因此调用时传 `chat_template_kwargs={"enable_thinking": False}`；
+若某量化版本的 chat 模板不认识该参数，会自动去掉重试。
+另外还做了输出端兜底：`_strip_thinking()` 正则剥离任何残留的 `<think>` 块
+（含未闭合的尾部），流式输出时基于累加文本**增量剥离**，
+避免半截标签被当成正文说出来。
+
+**② 解析 `<tool_call>` 标签**
+
+Qwen3-14B 在默认 chat 模板下**不返回** OpenAI 标准的 `tool_calls`，
+而是把调用写进 `content`：
+
+```
+<tool_call>
+{"name": "set_led", "arguments": {"color": "red", "pattern": "flash"}}
+</tool_call>
+```
+
+`_extract_tool_calls()` 会把它解析成标准结构，使上层只处理一种格式。
+若模型生成时被 `max_tokens` 截断（JSON 未闭合），
+`_repair_truncated_json()` 会逐字符回溯并补全括号，尽量把调用救回来。
 ```
 
 封装层 `LocalLLM` 提供两类推理接口，且**接口与 OpenAI 兼容**，方便未来切换到云端或宿主机的 `llama-server`：
@@ -259,10 +292,18 @@ export FORCE_CMAKE=1
 
 ```env
 ANIMAT_LLM_BACKEND=local
-ANIMAT_MODEL_PATH=/root/Workspace/animat-agent/models/Qwen2.5-1.5B-Instruct-Q4_K_M.gguf
+ANIMAT_MODEL_PATH=/root/Workspace/animat-agent/models/Qwen3-14B-Q4_K_M.gguf
 # ANIMAT_N_GPU_LAYERS=99    # 留空即自动探测；显式设 0 可强制 CPU
+ANIMAT_N_CTX=4096           # 上下文窗口；工具 schema + 回注结果很占空间，别设太小
 ANIMAT_N_THREADS=8
+ANIMAT_MAX_THINK_TOKENS=768 # 单轮思维输出上限，工具调用需额外空间生成 JSON
 ANIMAT_LLM_VERBOSE=0        # 设 1 会打印大量 llama.cpp 内部日志，仅调试时开
+
+# 工具调用相关
+ANIMAT_TOOLS=1                      # 0 关闭全部工具
+DEEPSEEK_API_KEY=sk-xxx             # web_search 需要
+ANIMAT_SEARCH_MAX_PER_DAY=200       # 搜索每日配额，防费用失控
+ANIMAT_CALL_COOLDOWN=60             # 主动呼唤冷却（秒）
 ```
 
 ### 7.5 验证
@@ -279,7 +320,17 @@ ggml_cuda_init: found 1 CUDA devices (Total VRAM: 15847 MiB):
 Loading local LLM: ... [GPU mode, n_gpu_layers=99]
 ```
 
-### 7.6 实测性能（RTX 5060 Ti 16GB / Qwen2.5-1.5B Q4_K_M）
+### 7.6 实测性能
+
+**Qwen3-14B Q4_K_M（RTX 5060 Ti 16GB，全量 GPU）**
+
+| 指标 | 数值 |
+|------|------|
+| 显存占用 | **14.8 GB / 16 GB**（n_ctx=4096） |
+| 模型加载 | 约 5 s |
+| 说明 | 余量仅约 1.4GB，`n_ctx` 不宜再往上调 |
+
+**Qwen2.5-1.5B Q4_K_M（历史数据，对比参考）**
 
 | 指标 | GPU | CPU |
 |------|-----|-----|

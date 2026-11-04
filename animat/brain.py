@@ -161,51 +161,57 @@ class AnimatBrain:
         """
         logger.info("Heartbeat loop v2 started")
         while self._running:
-            # ── 稳态五大指标 ──
-            vitals = {
-                v.value: round(self.homeostasis._vitals[v], 1)
-                for v in Vital
-            }
-
-            # ── 情感（主导 + 次导 + 强度 + 原因）──
-            dominant = self.homeostasis.get_dominant_emotion()
-            all_emotions = getattr(self.homeostasis, "_active_emotions", []) or []
-            emotion_payload = {
-                "dominant": dominant.circuit.value if dominant else "SEEKING",
-                "intensity": round(dominant.intensity, 2) if dominant else 0.0,
-                "cause": dominant.cause if dominant else "",
-                "all": [
-                    {"circuit": e.circuit.value, "intensity": round(e.intensity, 2),
-                     "cause": e.cause}
-                    for e in all_emotions
-                ],
-            }
-
-            # ── 意识流统计 ──
-            stats = self.stream_cortex.stats()
-
-            # ── 记忆摘要 ──
+            # 状态广播属于"尽力而为"的遥测：任何一步失败都不应终止整个
+            # 心跳循环。此前没有 try/except，一次异常就让 state 永久停播，
+            # 前端表现为"左侧一直未连接，右侧独白照常刷新"。
             try:
-                self_info = await self.memory.recall_semantic("self_info") or {}
-            except Exception:
-                self_info = {}
-            recent_conv = self.stream_cortex._conversation_history[-6:]
+                # ── 稳态五大指标 ──
+                vitals = {
+                    v.value: round(self.homeostasis._vitals[v], 1)
+                    for v in Vital
+                }
 
-            # ── 打包广播 ──
-            await self.nervous.fire("animat/state", {
-                "tick": self._tick_count,
-                "viability": vitals[Vital.VIABILITY.value],
-                "vitals": vitals,
-                "emotion": emotion_payload,
-                "drive_level": self.stream_cortex._drive_level,
-                "thoughts": stats["thoughts_total"],
-                "activations": stats["activations"],
-                "activation_rate_pct": stats["activation_rate_pct"],
-                "thoughts_per_min": stats["thoughts_per_min"],
-                "conversation_history": recent_conv,
-                "self_info": self_info,
-                "timestamp": time.time(),
-            })
+                # ── 情感（主导 + 次导 + 强度 + 原因）──
+                dominant = self.homeostasis.get_dominant_emotion()
+                all_emotions = getattr(self.homeostasis, "_active_emotions", []) or []
+                emotion_payload = {
+                    "dominant": dominant.circuit.value if dominant else "SEEKING",
+                    "intensity": round(dominant.intensity, 2) if dominant else 0.0,
+                    "cause": dominant.cause if dominant else "",
+                    "all": [
+                        {"circuit": e.circuit.value, "intensity": round(e.intensity, 2),
+                         "cause": e.cause}
+                        for e in all_emotions
+                    ],
+                }
+
+                # ── 意识流统计 ──
+                stats = self.stream_cortex.stats()
+
+                # ── 记忆摘要 ──
+                try:
+                    self_info = await self.memory.recall_semantic("self_info") or {}
+                except Exception:
+                    self_info = {}
+                recent_conv = self.stream_cortex._conversation_history[-6:]
+
+                # ── 打包广播 ──
+                await self.nervous.fire("animat/state", {
+                    "tick": self._tick_count,
+                    "viability": vitals[Vital.VIABILITY.value],
+                    "vitals": vitals,
+                    "emotion": emotion_payload,
+                    "drive_level": self.stream_cortex._drive_level,
+                    "thoughts": stats["thoughts_total"],
+                    "activations": stats["activations"],
+                    "activation_rate_pct": stats["activation_rate_pct"],
+                    "thoughts_per_min": stats["thoughts_per_min"],
+                    "conversation_history": recent_conv,
+                    "self_info": self_info,
+                    "timestamp": time.time(),
+                })
+            except Exception:
+                logger.warning("heartbeat broadcast failed (will retry)", exc_info=True)
 
             await asyncio.sleep(1.0)
 

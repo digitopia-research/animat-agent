@@ -226,6 +226,11 @@ animat-agent/
 │   ├── cloud_llm.py       # 云端 LLM backend (OpenAI 兼容)
 │   ├── memory.py          # Redis 记忆系统 (情景/语义记忆)
 │   ├── action.py          # 行为执行层 (意图 → 动作树)
+│   ├── tools/             # LLM 工具调用 (set_led/move/express/gesture/web_search)
+│   │   ├── spec.py        #   ParamSpec/ToolSpec (一份定义同时生成 schema 与校验)
+│   │   ├── registry.py    #   白名单、参数校验、频控、MQTT 分发
+│   │   ├── effector.py    #   执行器工具 (全部发布到 animat/effector/*)
+│   │   └── knowledge.py   #   web_search (DeepSeek 搜索 API)
 │   ├── main.py            # 启动入口
 │   ├── simulator.py       # MQTT 传感器模拟器 (交互式)
 │   └── simulator_web.html # 浏览器 WebSocket 控制面板

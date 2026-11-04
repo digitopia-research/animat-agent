@@ -417,6 +417,11 @@ animat-agent/
 │   ├── nervous.py                   # MQTT nervous bus (auto-reconnect)
 │   ├── memory.py                    # Redis memory store (auto-reconnect + health check)
 │   ├── action.py                    # Action execution (intent → motor commands)
+│   ├── tools/                       # LLM tool calling (set_led/move/express/gesture/web_search)
+│   │   ├── spec.py                  #   ParamSpec/ToolSpec — one definition yields schema + validation
+│   │   ├── registry.py              #   Whitelist, arg validation, rate limits, MQTT dispatch
+│   │   ├── effector.py              #   Actuator tools (all publish to animat/effector/*)
+│   │   └── knowledge.py             #   web_search (DeepSeek search API)
 │   ├── simulator.py                 # MQTT sensor simulator (interactive)
 │   └── simulator_web.html           # Browser WebSocket control panel
 │

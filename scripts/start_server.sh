@@ -72,7 +72,8 @@ start_animat() {
     cd "${PROJECT_DIR}"
     echo "[..] 启动 animat（本地 GPU 模型）"
     nohup "${ANIMAT_BIN}" --reset > "${ANIMAT_LOG}" 2>&1 &
-    sleep 3
+    # 14B 模型加载约 5s，留足时间再判断，避免误报启动失败
+    sleep 6
     if animat_running; then
         echo "[ok] animat 已启动，日志 -> ${ANIMAT_LOG}"
     else
@@ -82,14 +83,42 @@ start_animat() {
 }
 
 stop_animat() {
-    if animat_running; then
-        echo "[..] 停止 animat"
-        pkill -f "animat --reset" 2>/dev/null || true
-        pkill -f "animat.main:cli" 2>/dev/null || true
-        sleep 1
-        animat_running && echo "[!] 仍未停止" || echo "[ok] animat 已停止"
-    else
+    if ! animat_running; then
         echo "[ok] animat 未运行"
+        return
+    fi
+
+    echo "[..] 停止 animat"
+    # 先礼后兵：SIGTERM 让进程走优雅关闭（保存状态、断开 MQTT/Redis、
+    # 释放 GPU 显存）。14B 模型释放显存需要数秒，固定 sleep 1 不够，
+    # 会导致 restart 里 start 判定"仍在运行"而跳过启动——表现为永远重启不了。
+    pkill -f "animat --reset" 2>/dev/null || true
+    pkill -f "animat.main:cli" 2>/dev/null || true
+
+    local waited=0
+    local timeout="${ANIMAT_STOP_TIMEOUT:-20}"
+    while animat_running && [ "${waited}" -lt "${timeout}" ]; do
+        sleep 1
+        waited=$((waited + 1))
+    done
+
+    if animat_running; then
+        echo "[!] ${timeout}s 内未退出，强制终止"
+        pkill -9 -f "animat --reset" 2>/dev/null || true
+        pkill -9 -f "animat.main:cli" 2>/dev/null || true
+        sleep 2
+    fi
+
+    # 强制终止后仍需等待显存释放，否则新进程加载模型会 OOM
+    if animat_running; then
+        echo "[!] 仍未停止"
+    else
+        echo "[ok] animat 已停止"
+        if [ -n "${ANIMAT_STOP_GRACE:-}" ]; then
+            sleep "${ANIMAT_STOP_GRACE}"
+        else
+            sleep 3
+        fi
     fi
 }
 

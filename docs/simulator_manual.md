@@ -10,8 +10,14 @@
 `animat.simulator` 是一个**无实体硬件时的开发测试工具**。它本身**不加载 LLM**，而是：
 
 - 作为独立的 MQTT 客户端，向 `animat/sensor/*` 主题发布**传感器数据**（模拟触觉、视觉、听觉、内感）；
-- 订阅 `animat/motor`、`animat/cortex/output`、`animat/heartbeat`，把 Animat 的动作指令与思维流**打印到终端**，让你"看见"它在做什么；
+- 订阅 `animat/motor`、`animat/cortex/output`、`animat/heartbeat`，以及效应器通路
+  `animat/effector/{led,expression,gesture}`，把 Animat 的动作指令与思维流**打印到终端**，
+  让你"看见"它在做什么；
 - 提供一个交互式终端，让你用自然语言对话，或用手动命令**主动刺激** Animat，观察它的反应。
+
+> **关于效应器通路**：LLM 通过工具调用（`set_led` / `move` / `express` / `gesture`）
+> 驱动身体。每个工具发布到对应的 MQTT 话题，执行端订阅后执行——
+> 模拟器与真实硬件订阅同名话题即可互换，**主进程侧无需改动**。
 
 它必须和主进程 `uv run animat` 配合使用——模拟器是 Animat 的"身体与外界"，主进程是 Animat 的"大脑"。
 
@@ -146,9 +152,16 @@ ANIMAT_SIM_BATTERY=100 ANIMAT_SIM_DISCHARGE=0.02 uv run python -m animat.simulat
 [INTERO] ⚡ CHARGING battery=85.3% temp=37.2°C  ← 内感周期（debug 级）
 
 🗣️  Animat says: <文本>             ← 主进程 emit 的 speak 意图（Agent 说的话）
-🔧 Motor: led {'color': 'red', 'pattern': 'flash'}  ← 主进程 emit 的动作指令
+💡 LED: red / flash (3000ms)         ← 工具 set_led 发布到 animat/effector/led
+😊 Expression: happy (intensity=0.70) ← 工具 express 发布到 animat/effector/expression
+🤖 Gesture: nod x1                   ← 工具 gesture 发布到 animat/effector/gesture
+🔧 Motor: move {'direction': 'forward', 'speed': 0.4, 'distance_cm': 30}
 🧠 Intent: move | Text: <文本>      ← 主进程 cortex output（思考后的意图+文本）
 ```
+
+> **工具调用**：上面 💡/😊/🤖 三行来自 LLM 的工具调用，而非固定动作树。
+> 模型自己决定要不要开灯、开什么颜色。工具执行的完整日志在
+> `/tmp/animat.log` 搜 `工具 xxx 已发布`。
 
 当 Animat 说话或执行动作时，说明对应思维**通过了 ActionGate 门控**并被输出；被门控拦截的思维不会出现在 `🗣️`/`🧠` 行。
 
@@ -241,7 +254,8 @@ A：按彻底程度从弱到强：
 | 主区左「与 Animat 对话」 | 你与 Animat 的**对白**（你说 / 它说出口的话） | 普通文本输入 |
 | 主区右「Animat 内心思考」 | 订阅 `animat/cortex/thought`，展示**每一次内部思维流**（大多不说出口，仅"说出口"的标绿） | 实时 |
 | 底部输入框 | 直接对话 | 普通文本输入 |
-| 主日志区 | 打印 Animat 的 🗣️说话 / 🔧Motor / 🧠Intent | 终端日志 |
+| 左侧「效应器 · LED 显示器」 | 订阅 `animat/effector/*`，实时渲染 LED 颜色/闪烁，并显示最近表情与手势 | 终端 `💡/😊/🤖` 行 |
+| 主日志区 | 打印 Animat 的 🗣️说话 / 💡LED / 😊表情 / 🤖手势 / 🔧Motor / 🧠Intent | 终端日志 |
 
 > **内部状态实时面板**：主进程 `brain.py` 的 heartbeat 循环每秒向 `animat/state` 广播一份完整快照（见下方 §8.2 字段表）。网页端订阅后，左侧「Animat 内部状态」面板会即时刷新——这是**主进程真实内部状态**，区别于下方「我发送的内感（本地模拟）」（那是浏览器自己算的、即将发布给主进程的电量/体温）。
 > 网页版的内感（电量/体温）循环在**浏览器本地**维护并自动发布到 `animat/sensor/interoception`，与终端模拟器行为一致。拼音乱码拦截同样内置。

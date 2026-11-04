@@ -809,14 +809,14 @@ class StreamCortex:
             # （曾导致 5075 > 4096 的持续报错）。
             line = result.to_context_line()
             if line:
-                if len(line) > TOOL_RESULT_MAX_CHARS:
-                    line = line[:TOOL_RESULT_MAX_CHARS] + "…(已截断)"
+                if len(line) > self.TOOL_RESULT_MAX_CHARS:
+                    line = line[:self.TOOL_RESULT_MAX_CHARS] + "…(已截断)"
                 self._tool_results.append(line)
                 # 只保留最近 2 条，且总量不超过预算
                 while len(self._tool_results) > 2:
                     self._tool_results.pop(0)
                 total = sum(len(x) for x in self._tool_results)
-                while total > TOOL_RESULTS_TOTAL_MAX and len(self._tool_results) > 1:
+                while total > self.TOOL_RESULTS_TOTAL_MAX and len(self._tool_results) > 1:
                     total -= len(self._tool_results.pop(0))
 
     async def _emit_action(self, decision: ActionDecision, thought: Thought):
