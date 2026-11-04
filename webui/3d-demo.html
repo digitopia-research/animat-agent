@@ -1,0 +1,792 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>3D Robot Simulator Playground</title>
+    <!-- 依赖全部本地化（vendor/），内网与离线环境可用 -->
+    <!-- Tailwind CSS for UI HUD -->
+    <script src="vendor/tailwind.min.js"></script>
+    <!-- Three.js Library -->
+    <script src="vendor/three.min.js"></script>
+    <!-- 图标改用内联 SVG（见页面底部 icon 样式），不依赖外部字体 -->
+    <style>
+        /* 内联 SVG 图标基础样式 */
+        .icon { display: inline-block; vertical-align: middle; flex-shrink: 0; }
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            font-family: 'Inter', system-ui, -apple-system, sans-serif;
+            background-color: #090d16;
+            user-select: none;
+            -webkit-user-select: none;
+        }
+
+        #webgl-canvas {
+            width: 100%;
+            height: 100%;
+            display: block;
+        }
+
+        /* Modern Glassmorphic Dashboard HUD */
+        .glass-panel {
+            background: rgba(13, 22, 38, 0.75);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border: 1px solid rgba(0, 240, 255, 0.2);
+            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.5), inset 0 0 12px rgba(0, 240, 255, 0.05);
+        }
+
+        .neon-text-cyan {
+            color: #00f0ff;
+            text-shadow: 0 0 8px rgba(0, 240, 255, 0.6);
+        }
+
+        .neon-border-cyan {
+            border-color: rgba(0, 240, 255, 0.4);
+            box-shadow: 0 0 10px rgba(0, 240, 255, 0.2);
+        }
+
+        .btn-cyber {
+            background: rgba(15, 23, 42, 0.8);
+            border: 1px solid rgba(0, 240, 255, 0.3);
+            color: #e2e8f0;
+            transition: all 0.2s ease;
+        }
+
+        .btn-cyber:hover, .btn-cyber.active {
+            background: rgba(0, 240, 255, 0.2);
+            border-color: #00f0ff;
+            color: #00f0ff;
+            box-shadow: 0 0 12px rgba(0, 240, 255, 0.4);
+        }
+
+        /* Radar Scanner Animation */
+        @keyframes radar-sweep {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .radar-sweep-line {
+            animation: radar-sweep 4s linear infinite;
+            transform-origin: center center;
+        }
+
+        /* Custom scrollbar for control overlay */
+        ::-webkit-scrollbar {
+            width: 4px;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: rgba(0, 240, 255, 0.3);
+            border-radius: 4px;
+        }
+    </style>
+</head>
+<body class="relative">
+
+    <!-- 3D Canvas -->
+    <canvas id="webgl-canvas"></canvas>
+
+    <!-- Top Telemetry Header HUD -->
+    <div class="absolute top-4 left-4 right-4 flex justify-between items-start pointer-events-none z-10">
+        <!-- System Status Box -->
+        <div class="glass-panel rounded-xl p-4 pointer-events-auto flex items-center space-x-4 max-w-xs sm:max-w-md">
+            <div class="relative w-12 h-12 rounded-full border border-cyan-500/40 flex items-center justify-center bg-cyan-950/40">
+                <svg class="icon w-6 h-6 text-cyan-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                    <rect x="4" y="8" width="16" height="12" rx="2.5"/><circle cx="9" cy="14" r="1.3" fill="currentColor" stroke="none"/><circle cx="15" cy="14" r="1.3" fill="currentColor" stroke="none"/><path d="M12 4v4"/><circle cx="12" cy="3" r="1.2" fill="currentColor" stroke="none"/>
+                </svg>
+                <div class="absolute inset-0 rounded-full border border-cyan-400 animate-ping opacity-25"></div>
+            </div>
+            <div>
+                <h1 class="font-bold text-sm sm:text-base tracking-wider text-slate-100 uppercase flex items-center gap-2">
+                    ROBO-UNIT Mark-IV
+                    <span class="inline-block w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                </h1>
+                <p class="text-xs text-cyan-300/80 font-mono">STATUS: ONLINE | READY</p>
+            </div>
+        </div>
+
+        <!-- Camera Control Options -->
+        <div class="glass-panel rounded-xl p-2 pointer-events-auto flex gap-1 sm:gap-2">
+            <button id="cam-tp" class="btn-cyber active px-3 py-2 rounded-lg text-xs font-semibold flex items-center gap-2">
+                <svg class="icon w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M2 12s3.6-6.5 10-6.5S22 12 22 12s-3.6 6.5-10 6.5S2 12 2 12z"/><circle cx="12" cy="12" r="2.6"/>
+                </svg> <span class="hidden sm:inline">Third Person</span>
+            </button>
+            <button id="cam-fp" class="btn-cyber px-3 py-2 rounded-lg text-xs font-semibold flex items-center gap-2">
+                <svg class="icon w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                    <rect x="2" y="7" width="20" height="10" rx="3"/><circle cx="8" cy="12" r="1.8"/><circle cx="16" cy="12" r="1.8"/>
+                </svg> <span class="hidden sm:inline">First Person</span>
+            </button>
+            <button id="cam-top" class="btn-cyber px-3 py-2 rounded-lg text-xs font-semibold flex items-center gap-2">
+                <svg class="icon w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M12 3l9 5-9 5-9-5 9-5z"/><path d="M3 13l9 5 9-5"/>
+                </svg> <span class="hidden sm:inline">Top Down</span>
+            </button>
+        </div>
+    </div>
+
+    <!-- Bottom Left Telemetry Panel -->
+    <div class="absolute bottom-4 left-4 pointer-events-none z-10 max-w-xs w-full hidden sm:block">
+        <div class="glass-panel rounded-xl p-4 pointer-events-auto space-y-3 font-mono text-xs">
+            <div class="flex justify-between items-center border-b border-cyan-500/20 pb-2">
+                <span class="text-slate-400">SPEED:</span>
+                <span id="telemetry-speed" class="text-cyan-400 font-bold text-sm">0.0 km/h</span>
+            </div>
+            <div class="flex justify-between items-center border-b border-cyan-500/20 pb-2">
+                <span class="text-slate-400">HEADING:</span>
+                <span id="telemetry-heading" class="text-cyan-400 font-bold">0.0°</span>
+            </div>
+            <div class="flex justify-between items-center border-b border-cyan-500/20 pb-2">
+                <span class="text-slate-400">POSITION (X, Z):</span>
+                <span id="telemetry-pos" class="text-cyan-400 font-bold">0.0, 0.0</span>
+            </div>
+            <!-- Radar Display -->
+            <div class="flex items-center justify-between pt-1">
+                <span class="text-slate-400">RADAR SENSOR:</span>
+                <div class="relative w-12 h-12 rounded-full border border-cyan-500/50 bg-slate-900/80 flex items-center justify-center overflow-hidden">
+                    <div class="absolute inset-0 radar-sweep-line border-t border-cyan-400/80 bg-gradient-to-tr from-cyan-500/20 to-transparent"></div>
+                    <div id="radar-blip" class="w-1.5 h-1.5 rounded-full bg-cyan-400 shadow-[0_0_8px_#00f0ff] transition-all duration-75" style="transform: translate(0px, 0px);"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Controls Legend Side Overlay -->
+    <div class="absolute bottom-4 right-4 pointer-events-none z-10 hidden md:block">
+        <div class="glass-panel rounded-xl p-4 pointer-events-auto font-mono text-xs text-slate-300 space-y-2 max-w-xs">
+            <div class="text-cyan-400 font-bold text-xs tracking-wider uppercase mb-2 border-b border-cyan-500/30 pb-1">
+                <svg class="icon w-3.5 h-3.5 mr-1 inline-block align-[-2px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                    <rect x="2" y="7" width="20" height="10" rx="4"/><path d="M7 12h4M9 10v4"/><circle cx="16" cy="11" r="1"/><circle cx="18.5" cy="13.5" r="1"/>
+                </svg> Control Matrix
+            </div>
+            <div class="grid grid-cols-2 gap-x-4 gap-y-1">
+                <span><kbd class="px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700 text-cyan-300">W / S</kbd> Drive</span>
+                <span><kbd class="px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700 text-cyan-300">A / D</kbd> Steer</span>
+                <span><kbd class="px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700 text-cyan-300">Q / E</kbd> Lift Arm</span>
+                <span><kbd class="px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700 text-cyan-300">Z / C</kbd> Turret</span>
+                <span><kbd class="px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700 text-cyan-300">Space</kbd> Boost Jump</span>
+                <span><kbd class="px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700 text-cyan-300">R</kbd> Reset Pos</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- On-Screen Mobile Touch Controls (Visible on Touch Screen / Small Devices) -->
+    <div class="absolute bottom-4 left-4 right-4 flex justify-between items-end pointer-events-none z-20 sm:hidden">
+        <!-- D-Pad Directional -->
+        <div class="pointer-events-auto grid grid-cols-3 gap-2 w-36 h-36">
+            <div></div>
+            <button id="btn-up" class="btn-cyber rounded-xl flex items-center justify-center text-xl font-bold active:bg-cyan-500/40">▲</button>
+            <div></div>
+            <button id="btn-left" class="btn-cyber rounded-xl flex items-center justify-center text-xl font-bold active:bg-cyan-500/40">◀</button>
+            <button id="btn-down" class="btn-cyber rounded-xl flex items-center justify-center text-xl font-bold active:bg-cyan-500/40">▼</button>
+            <button id="btn-right" class="btn-cyber rounded-xl flex items-center justify-center text-xl font-bold active:bg-cyan-500/40">▶</button>
+        </div>
+        <!-- Action Buttons -->
+        <div class="pointer-events-auto flex flex-col gap-2">
+            <button id="btn-boost" class="btn-cyber px-4 py-3 rounded-xl font-bold text-xs uppercase tracking-wider bg-cyan-950/60 text-cyan-300">Boost</button>
+            <div class="flex gap-2">
+                <button id="btn-arm-up" class="btn-cyber w-12 h-12 rounded-xl font-bold text-sm">Arm▲</button>
+                <button id="btn-arm-dn" class="btn-cyber w-12 h-12 rounded-xl font-bold text-sm">Arm▼</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Main WebGL 3D Logic -->
+    <script>
+        // --- 1. Core Scene Setup ---
+        const canvas = document.getElementById('webgl-canvas');
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x0a0f1d);
+        scene.fog = new THREE.FogExp2(0x0a0f1d, 0.015);
+
+        // Camera Initialization
+        const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+        
+        const renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+        // --- 2. Lighting Setup ---
+        const ambientLight = new THREE.AmbientLight(0x334155, 1.2);
+        scene.add(ambientLight);
+
+        // Key Overhead Directional Light (Sunlight/Ceiling Light)
+        const dirLight = new THREE.DirectionalLight(0xffffff, 1.5);
+        dirLight.position.set(25, 40, 20);
+        dirLight.castShadow = true;
+        dirLight.shadow.mapSize.width = 2048;
+        dirLight.shadow.mapSize.height = 2048;
+        dirLight.shadow.camera.near = 0.5;
+        dirLight.shadow.camera.far = 150;
+        const d = 35;
+        dirLight.shadow.camera.left = -d;
+        dirLight.shadow.camera.right = d;
+        dirLight.shadow.camera.top = d;
+        dirLight.shadow.camera.bottom = -d;
+        scene.add(dirLight);
+
+        // Neon Accent Point Lights inside the Room
+        const pointLight1 = new THREE.PointLight(0x00f0ff, 2.5, 40);
+        pointLight1.position.set(-18, 12, -18);
+        scene.add(pointLight1);
+
+        const pointLight2 = new THREE.PointLight(0xff0055, 2.5, 40);
+        pointLight2.position.set(18, 12, 18);
+        scene.add(pointLight2);
+
+        // --- 3. Room & Environment Construction ---
+        const ROOM_SIZE = 50;
+
+        // Floor Grid with Canvas-generated Tech Grid Texture
+        function createGridTexture() {
+            const size = 512;
+            const canvas = document.createElement('canvas');
+            canvas.width = size;
+            canvas.height = size;
+            const ctx = canvas.getContext('2d');
+
+            ctx.fillStyle = '#0f172a';
+            ctx.fillRect(0, 0, size, size);
+
+            // Grid Lines
+            ctx.strokeStyle = '#1e293b';
+            ctx.lineWidth = 2;
+            const step = size / 16;
+            for (let x = 0; x <= size; x += step) {
+                ctx.beginPath();
+                ctx.moveTo(x, 0); ctx.lineTo(x, size);
+                ctx.stroke();
+                ctx.beginPath();
+                ctx.moveTo(0, x); ctx.lineTo(size, x);
+                ctx.stroke();
+            }
+
+            // Accent Tech Dots
+            ctx.fillStyle = '#00f0ff';
+            for (let x = 0; x <= size; x += step * 4) {
+                for (let y = 0; y <= size; y += step * 4) {
+                    ctx.beginPath();
+                    ctx.arc(x, y, 3, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+            }
+            return new THREE.CanvasTexture(canvas);
+        }
+
+        const floorTexture = createGridTexture();
+        floorTexture.wrapS = THREE.RepeatWrapping;
+        floorTexture.wrapT = THREE.RepeatWrapping;
+        floorTexture.repeat.set(10, 10);
+
+        const floorMaterial = new THREE.MeshStandardMaterial({
+            map: floorTexture,
+            roughness: 0.4,
+            metalness: 0.2
+        });
+
+        const floor = new THREE.Mesh(new THREE.PlaneGeometry(ROOM_SIZE, ROOM_SIZE), floorMaterial);
+        floor.rotation.x = -Math.PI / 2;
+        floor.receiveShadow = true;
+        scene.add(floor);
+
+        // Room Walls Construction
+        const wallMaterial = new THREE.MeshStandardMaterial({ color: 0x0f172a, roughness: 0.8 });
+        const wallHeight = 12;
+
+        const wallGeom = new THREE.BoxGeometry(ROOM_SIZE, wallHeight, 1);
+        
+        // North Wall
+        const wallN = new THREE.Mesh(wallGeom, wallMaterial);
+        wallN.position.set(0, wallHeight / 2, -ROOM_SIZE / 2);
+        wallN.receiveShadow = true;
+        scene.add(wallN);
+
+        // South Wall
+        const wallS = new THREE.Mesh(wallGeom, wallMaterial);
+        wallS.position.set(0, wallHeight / 2, ROOM_SIZE / 2);
+        wallS.receiveShadow = true;
+        scene.add(wallS);
+
+        // East Wall
+        const wallE = new THREE.Mesh(wallGeom, wallMaterial);
+        wallE.rotation.y = Math.PI / 2;
+        wallE.position.set(ROOM_SIZE / 2, wallHeight / 2, 0);
+        wallE.receiveShadow = true;
+        scene.add(wallE);
+
+        // West Wall
+        const wallW = new THREE.Mesh(wallGeom, wallMaterial);
+        wallW.rotation.y = Math.PI / 2;
+        wallW.position.set(-ROOM_SIZE / 2, wallHeight / 2, 0);
+        wallW.receiveShadow = true;
+        scene.add(wallW);
+
+        // Glow Border Trim along Wall Base
+        const borderGeom = new THREE.BoxGeometry(ROOM_SIZE, 0.2, 0.2);
+        const borderMat = new THREE.MeshBasicMaterial({ color: 0x00f0ff });
+        const borderBase = new THREE.Mesh(borderGeom, borderMat);
+        borderBase.position.set(0, 0.1, -ROOM_SIZE / 2 + 0.6);
+        scene.add(borderBase);
+
+        // Interactive Obstacles Array & Colliders
+        const obstacles = [];
+        const boxMaterial = new THREE.MeshStandardMaterial({ color: 0x1e293b, roughness: 0.3, metalness: 0.7 });
+        const accentBoxMat = new THREE.MeshStandardMaterial({ color: 0x334155, roughness: 0.3, metalness: 0.5 });
+
+        function createObstacleBox(x, z, w, h, d, color = 0x334155) {
+            const mat = new THREE.MeshStandardMaterial({ color: color, roughness: 0.5 });
+            const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
+            mesh.position.set(x, h / 2, z);
+            mesh.castShadow = true;
+            mesh.receiveShadow = true;
+            scene.add(mesh);
+
+            // Glowing Edge Highlight
+            const edges = new THREE.EdgesGeometry(mesh.geometry);
+            const line = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0x00f0ff }));
+            mesh.add(line);
+
+            obstacles.push({
+                mesh: mesh,
+                minX: x - w / 2, maxX: x + w / 2,
+                minZ: z - d / 2, maxZ: z + d / 2,
+                radius: Math.max(w, d) / 2
+            });
+        }
+
+        // Add Obstacles around the Room
+        createObstacleBox(-10, -8, 4, 3, 4, 0x1e293b);
+        createObstacleBox(12, 10, 5, 2, 5, 0x1e293b);
+        createObstacleBox(-12, 12, 3, 5, 3, 0x0f172a);
+        createObstacleBox(8, -14, 6, 2, 4, 0x1e293b);
+        createObstacleBox(0, -18, 8, 1.5, 3, 0x334155);
+
+        // Ramp Feature
+        const rampGroup = new THREE.Group();
+        const rampGeom = new THREE.BoxGeometry(6, 0.5, 10);
+        const rampMesh = new THREE.Mesh(rampGeom, accentBoxMat);
+        rampMesh.rotation.x = Math.PI / 12; // 15 deg incline
+        rampMesh.position.set(0, 1.2, 0);
+        rampMesh.castShadow = true;
+        rampMesh.receiveShadow = true;
+        rampGroup.add(rampMesh);
+        rampGroup.position.set(-15, 0, 5);
+        scene.add(rampGroup);
+
+        // --- 4. Robot Creation (Modular Detailed Robot Mesh) ---
+        const robotGroup = new THREE.Group();
+        scene.add(robotGroup);
+
+        // Robot Chassis Main Body
+        const chassisMat = new THREE.MeshStandardMaterial({ color: 0x2563eb, roughness: 0.3, metalness: 0.8 });
+        const darkMetalMat = new THREE.MeshStandardMaterial({ color: 0x0f172a, roughness: 0.4, metalness: 0.9 });
+        const glowingCyanMat = new THREE.MeshBasicMaterial({ color: 0x00f0ff });
+
+        const chassis = new THREE.Mesh(new THREE.BoxGeometry(2.4, 0.8, 3.2), chassisMat);
+        chassis.position.y = 0.8;
+        chassis.castShadow = true;
+        robotGroup.add(chassis);
+
+        // Chassis Top Plate
+        const topPlate = new THREE.Mesh(new THREE.BoxGeometry(2.0, 0.2, 2.6), darkMetalMat);
+        topPlate.position.set(0, 1.3, 0);
+        topPlate.castShadow = true;
+        robotGroup.add(topPlate);
+
+        // Wheels / Treads (4 Wheels)
+        const wheelGeom = new THREE.CylinderGeometry(0.5, 0.5, 0.4, 24);
+        wheelGeom.rotateZ(Math.PI / 2);
+
+        const wheelPositions = [
+            [-1.3, 0.5, 1.0],  // Front Left
+            [1.3, 0.5, 1.0],   // Front Right
+            [-1.3, 0.5, -1.0], // Rear Left
+            [1.3, 0.5, -1.0]   // Rear Right
+        ];
+
+        const wheels = [];
+        wheelPositions.forEach(pos => {
+            const wheel = new THREE.Mesh(wheelGeom, darkMetalMat);
+            wheel.position.set(...pos);
+            wheel.castShadow = true;
+            robotGroup.add(wheel);
+            wheels.push(wheel);
+
+            // Wheel Rim Detail
+            const rim = new THREE.Mesh(new THREE.CylinderGeometry(0.25, 0.25, 0.42, 12), glowingCyanMat);
+            rim.rotateZ(Math.PI / 2);
+            wheel.add(rim);
+        });
+
+        // Revolving Turret Dome
+        const turretGroup = new THREE.Group();
+        turretGroup.position.set(0, 1.4, -0.2);
+        robotGroup.add(turretGroup);
+
+        const turretBase = new THREE.Mesh(new THREE.CylinderGeometry(0.8, 0.9, 0.5, 16), chassisMat);
+        turretBase.castShadow = true;
+        turretGroup.add(turretBase);
+
+        // Glowing Robot Sensor Head / Eyes
+        const headMesh = new THREE.Mesh(new THREE.BoxGeometry(1.0, 0.5, 0.8), darkMetalMat);
+        headMesh.position.set(0, 0.4, 0.2);
+        turretGroup.add(headMesh);
+
+        // Sensor Eyes
+        const eyeGeom = new THREE.SphereGeometry(0.12, 16, 16);
+        const eyeMat = new THREE.MeshBasicMaterial({ color: 0x00f0ff });
+        const leftEye = new THREE.Mesh(eyeGeom, eyeMat);
+        leftEye.position.set(-0.25, 0.4, 0.6);
+        const rightEye = new THREE.Mesh(eyeGeom, eyeMat);
+        rightEye.position.set(0.25, 0.4, 0.6);
+        turretGroup.add(leftEye);
+        turretGroup.add(rightEye);
+
+        // Head Spotlight Beam
+        const headSpotlight = new THREE.SpotLight(0x00f0ff, 3, 20, Math.PI / 6, 0.5);
+        headSpotlight.position.set(0, 0.4, 0.6);
+        headSpotlight.target.position.set(0, 0.4, 5);
+        turretGroup.add(headSpotlight);
+        turretGroup.add(headSpotlight.target);
+
+        // Articulated Robot Arm
+        const armBaseGroup = new THREE.Group();
+        armBaseGroup.position.set(0, 1.4, 0.8);
+        robotGroup.add(armBaseGroup);
+
+        const armJoint1 = new THREE.Mesh(new THREE.SphereGeometry(0.25, 16, 16), darkMetalMat);
+        armBaseGroup.add(armJoint1);
+
+        const armSegment1 = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.12, 1.2), chassisMat);
+        armSegment1.position.set(0, 0.6, 0);
+        armSegment1.castShadow = true;
+        armBaseGroup.add(armSegment1);
+
+        const armJoint2 = new THREE.Mesh(new THREE.SphereGeometry(0.2, 16, 16), darkMetalMat);
+        armJoint2.position.set(0, 1.2, 0);
+        armBaseGroup.add(armJoint2);
+
+        const armSegment2 = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.8, 0.2), darkMetalMat);
+        armSegment2.position.set(0, 1.5, 0.3);
+        armSegment2.rotation.x = Math.PI / 4;
+        armSegment2.castShadow = true;
+        armBaseGroup.add(armSegment2);
+
+        // Claw End Effector
+        const clawMat = new THREE.MeshBasicMaterial({ color: 0x00f0ff });
+        const claw = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.1, 0.3), clawMat);
+        claw.position.set(0, 1.8, 0.6);
+        armBaseGroup.add(claw);
+
+        // Camera Anchor for First Person POV
+        const fpCameraAnchor = new THREE.Object3D();
+        fpCameraAnchor.position.set(0, 0.6, 0.6);
+        turretGroup.add(fpCameraAnchor);
+
+        // --- 5. Robot Physics & Movement State ---
+        const robotState = {
+            posX: 0,
+            posY: 0,
+            posZ: 0,
+            speed: 0,
+            maxSpeed: 0.25,
+            acceleration: 0.012,
+            friction: 0.95,
+            heading: 0, // In Radians
+            turnSpeed: 0.045,
+            verticalVelocity: 0,
+            isGrounded: true,
+            gravity: -0.015,
+            jumpForce: 0.3,
+            armAngle: 0, // Arm joint angle
+            turretAngle: 0 // Turret rotation relative to chassis
+        };
+
+        // --- 6. Input Handler (Keyboard + Touch UI) ---
+        const keys = {
+            forward: false,
+            backward: false,
+            left: false,
+            right: false,
+            boost: false,
+            armUp: false,
+            armDown: false,
+            turretLeft: false,
+            turretRight: false
+        };
+
+        window.addEventListener('keydown', (e) => {
+            switch(e.code) {
+                case 'KeyW': case 'ArrowUp': keys.forward = true; break;
+                case 'KeyS': case 'ArrowDown': keys.backward = true; break;
+                case 'KeyA': case 'ArrowLeft': keys.left = true; break;
+                case 'KeyD': case 'ArrowRight': keys.right = true; break;
+                case 'Space': 
+                    if (robotState.isGrounded) {
+                        robotState.verticalVelocity = robotState.jumpForce;
+                        robotState.isGrounded = false;
+                    }
+                    break;
+                case 'KeyQ': keys.armUp = true; break;
+                case 'KeyE': keys.armDown = true; break;
+                case 'KeyZ': keys.turretLeft = true; break;
+                case 'KeyC': keys.turretRight = true; break;
+                case 'KeyR': resetRobotPosition(); break;
+            }
+        });
+
+        window.addEventListener('keyup', (e) => {
+            switch(e.code) {
+                case 'KeyW': case 'ArrowUp': keys.forward = false; break;
+                case 'KeyS': case 'ArrowDown': keys.backward = false; break;
+                case 'KeyA': case 'ArrowLeft': keys.left = false; break;
+                case 'KeyD': case 'ArrowRight': keys.right = false; break;
+                case 'KeyQ': keys.armUp = false; break;
+                case 'KeyE': keys.armDown = false; break;
+                case 'KeyZ': keys.turretLeft = false; break;
+                case 'KeyC': keys.turretRight = false; break;
+            }
+        });
+
+        // Touch Control Bindings
+        const setupTouchBtn = (id, keyName) => {
+            const btn = document.getElementById(id);
+            if (!btn) return;
+            btn.addEventListener('touchstart', (e) => { e.preventDefault(); keys[keyName] = true; });
+            btn.addEventListener('touchend', (e) => { e.preventDefault(); keys[keyName] = false; });
+            btn.addEventListener('mousedown', () => { keys[keyName] = true; });
+            btn.addEventListener('mouseup', () => { keys[keyName] = false; });
+        };
+
+        setupTouchBtn('btn-up', 'forward');
+        setupTouchBtn('btn-down', 'backward');
+        setupTouchBtn('btn-left', 'left');
+        setupTouchBtn('btn-right', 'right');
+        setupTouchBtn('btn-arm-up', 'armUp');
+        setupTouchBtn('btn-arm-dn', 'armDown');
+
+        const btnBoost = document.getElementById('btn-boost');
+        if (btnBoost) {
+            btnBoost.addEventListener('touchstart', (e) => {
+                e.preventDefault();
+                if (robotState.isGrounded) {
+                    robotState.verticalVelocity = robotState.jumpForce;
+                    robotState.isGrounded = false;
+                }
+            });
+        }
+
+        function resetRobotPosition() {
+            robotState.posX = 0;
+            robotState.posY = 0;
+            robotState.posZ = 0;
+            robotState.speed = 0;
+            robotState.heading = 0;
+            robotState.verticalVelocity = 0;
+            robotGroup.position.set(0, 0, 0);
+            robotGroup.rotation.y = 0;
+        }
+
+        // --- 7. Camera Modes Controller ---
+        let cameraMode = 'TP'; // Modes: 'TP' (Third Person), 'FP' (First Person), 'TOP' (Top Down)
+
+        const btnCamTP = document.getElementById('cam-tp');
+        const btnCamFP = document.getElementById('cam-fp');
+        const btnCamTOP = document.getElementById('cam-top');
+
+        function setCameraMode(mode) {
+            cameraMode = mode;
+            [btnCamTP, btnCamFP, btnCamTOP].forEach(btn => btn.classList.remove('active'));
+            if (mode === 'TP') btnCamTP.classList.add('active');
+            if (mode === 'FP') btnCamFP.classList.add('active');
+            if (mode === 'TOP') btnCamTOP.classList.add('active');
+        }
+
+        btnCamTP.addEventListener('click', () => setCameraMode('TP'));
+        btnCamFP.addEventListener('click', () => setCameraMode('FP'));
+        btnCamTOP.addEventListener('click', () => setCameraMode('TOP'));
+
+        // --- 8. Physics & Collision Engine Update ---
+        function updatePhysics() {
+            // Acceleration Logic
+            if (keys.forward) {
+                robotState.speed = Math.min(robotState.speed + robotState.acceleration, robotState.maxSpeed);
+            } else if (keys.backward) {
+                robotState.speed = Math.max(robotState.speed - robotState.acceleration, -robotState.maxSpeed * 0.6);
+            } else {
+                robotState.speed *= robotState.friction;
+            }
+
+            // Steering Logic
+            if (Math.abs(robotState.speed) > 0.005) {
+                const dir = robotState.speed > 0 ? 1 : -1;
+                if (keys.left) robotState.heading += robotState.turnSpeed * dir;
+                if (keys.right) robotState.heading -= robotState.turnSpeed * dir;
+            }
+
+            // Calculate Intended Movement Delta
+            const dx = Math.sin(robotState.heading) * robotState.speed;
+            const dz = Math.cos(robotState.heading) * robotState.speed;
+
+            let nextX = robotState.posX + dx;
+            let nextZ = robotState.posZ + dz;
+
+            // Room Boundary Collision Detection
+            const bound = ROOM_SIZE / 2 - 1.8;
+            if (nextX > bound) { nextX = bound; robotState.speed = 0; }
+            if (nextX < -bound) { nextX = -bound; robotState.speed = 0; }
+            if (nextZ > bound) { nextZ = bound; robotState.speed = 0; }
+            if (nextZ < -bound) { nextZ = -bound; robotState.speed = 0; }
+
+            // Obstacle AABB Collision Checking
+            const robotRadius = 1.2;
+            obstacles.forEach(obs => {
+                if (nextX + robotRadius > obs.minX && nextX - robotRadius < obs.maxX &&
+                    nextZ + robotRadius > obs.minZ && nextZ - robotRadius < obs.maxZ) {
+                    // Simple Bouncing Stop
+                    nextX = robotState.posX;
+                    nextZ = robotState.posZ;
+                    robotState.speed = -robotState.speed * 0.4;
+                }
+            });
+
+            robotState.posX = nextX;
+            robotState.posZ = nextZ;
+
+            // Vertical Jump / Gravity Physics
+            robotState.posY += robotState.verticalVelocity;
+            if (!robotState.isGrounded) {
+                robotState.verticalVelocity += robotState.gravity;
+                if (robotState.posY <= 0) {
+                    robotState.posY = 0;
+                    robotState.verticalVelocity = 0;
+                    robotState.isGrounded = true;
+                }
+            }
+
+            // Update Robot Mesh Position & Heading
+            robotGroup.position.set(robotState.posX, robotState.posY, robotState.posZ);
+            robotGroup.rotation.y = robotState.heading;
+
+            // Rotate Wheels based on drive speed
+            wheels.forEach(w => {
+                w.rotation.x += robotState.speed * 2;
+            });
+
+            // Arm Articulation Control
+            if (keys.armUp) robotState.armAngle = Math.min(robotState.armAngle + 0.03, Math.PI / 4);
+            if (keys.armDown) robotState.armAngle = Math.max(robotState.armAngle - 0.03, -Math.PI / 6);
+            armBaseGroup.rotation.x = robotState.armAngle;
+
+            // Turret Control
+            if (keys.turretLeft) robotState.turretAngle += 0.04;
+            if (keys.turretRight) robotState.turretAngle -= 0.04;
+            turretGroup.rotation.y = robotState.turretAngle;
+        }
+
+        // --- 9. Camera Smoothing & Positioning ---
+        const targetCamPos = new THREE.Vector3();
+        const targetLookAt = new THREE.Vector3();
+
+        function updateCamera() {
+            if (cameraMode === 'TP') {
+                // Smooth Third Person Camera Following Behind Robot
+                const distance = 9.0;
+                const height = 4.5;
+
+                const camX = robotState.posX - Math.sin(robotState.heading) * distance;
+                const camZ = robotState.posZ - Math.cos(robotState.heading) * distance;
+                const camY = robotState.posY + height;
+
+                targetCamPos.set(camX, camY, camZ);
+                targetLookAt.set(robotState.posX, robotState.posY + 1.2, robotState.posZ);
+
+                camera.position.lerp(targetCamPos, 0.08);
+                camera.lookAt(targetLookAt);
+
+            } else if (cameraMode === 'FP') {
+                // First Person Camera Mounted Inside Turret Head
+                const worldPos = new THREE.Vector3();
+                fpCameraAnchor.getWorldPosition(worldPos);
+                camera.position.copy(worldPos);
+
+                // Compute Look Vector from Turret Direction
+                const totalHeading = robotState.heading + robotState.turretAngle;
+                const lookTarget = new THREE.Vector3(
+                    worldPos.x + Math.sin(totalHeading) * 10,
+                    worldPos.y,
+                    worldPos.z + Math.cos(totalHeading) * 10
+                );
+                camera.lookAt(lookTarget);
+
+            } else if (cameraMode === 'TOP') {
+                // Overhead Tactical View Camera
+                targetCamPos.set(robotState.posX, 35, robotState.posZ + 0.1);
+                targetLookAt.set(robotState.posX, 0, robotState.posZ);
+
+                camera.position.lerp(targetCamPos, 0.1);
+                camera.lookAt(targetLookAt);
+            }
+        }
+
+        // --- 10. UI Telemetry & Radar Updates ---
+        const telemetrySpeed = document.getElementById('telemetry-speed');
+        const telemetryHeading = document.getElementById('telemetry-heading');
+        const telemetryPos = document.getElementById('telemetry-pos');
+        const radarBlip = document.getElementById('radar-blip');
+
+        function updateTelemetryHUD() {
+            const speedKmh = (Math.abs(robotState.speed) * 120).toFixed(1);
+            telemetrySpeed.textContent = `${speedKmh} km/h`;
+
+            // Degree heading conversion
+            let deg = Math.round((robotState.heading * (180 / Math.PI)) % 360);
+            if (deg < 0) deg += 360;
+            telemetryHeading.textContent = `${deg}°`;
+
+            telemetryPos.textContent = `${robotState.posX.toFixed(1)}, ${robotState.posZ.toFixed(1)}`;
+
+            // Radar Blip Translation
+            const radarScale = 0.8;
+            const blipX = robotState.posX * radarScale;
+            const blipY = robotState.posZ * radarScale;
+            radarBlip.style.transform = `translate(${blipX}px, ${blipY}px)`;
+        }
+
+        // --- 11. Main Render Animation Loop ---
+        function animate() {
+            requestAnimationFrame(animate);
+
+            // Physics Update
+            updatePhysics();
+
+            // Camera Tracking Update
+            updateCamera();
+
+            // Telemetry HUD Update
+            updateTelemetryHUD();
+
+            // Render 3D Frame
+            renderer.render(scene, camera);
+        }
+
+        // --- 12. Responsive Window Handling ---
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        // Initialize Loop on Page Load
+        window.onload = () => {
+            animate();
+        };
+    </script>
+</body>
+</html>

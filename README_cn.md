@@ -205,7 +205,7 @@ ANIMAT_SIM_AUTO_STIM=1 uv run python -m animat.simulator
   /help    — 列出命令
 ```
 
-浏览器版控制面板见 `animat/simulator_web.html`（连接 `ws://<host>:8083/mqtt`，详见 `docs/simulator_manual.md`）。
+浏览器版控制面板在 `webui/` 目录，用 `python scripts/serve_webui.py` 起本地服务后访问 `http://localhost:8000/`（连接 `ws://<host>:8083/mqtt`，详见 `docs/simulator_manual.md`）。
 
 ## 项目结构
 
@@ -232,9 +232,11 @@ animat-agent/
 │   │   ├── effector.py    #   执行器工具 (全部发布到 animat/effector/*)
 │   │   └── knowledge.py   #   web_search (DeepSeek 搜索 API)
 │   ├── main.py            # 启动入口
-│   ├── simulator.py       # MQTT 传感器模拟器 (交互式)
-│   └── simulator_web.html # 浏览器 WebSocket 控制面板
-├── scripts/               # demo 与工具脚本 (含 simulator_v2.py, start_server.sh)
+│   └── simulator.py       # MQTT 传感器模拟器 (交互式)
+├── webui/                 # 浏览器控制台 (3D 世界视口 + 对话)
+│   ├── index.html         #   主页面 (原 animat/simulator_web.html)
+│   └── vendor/            #   three.min.js / mqtt.min.js (内置，可离线)
+├── scripts/               # demo 与工具脚本 (含 serve_webui.py, start_server.sh)
 ├── tests/                 # 单元测试 (conftest.py, test_homeostasis.py)
 ├── docs/                  # 设计/部署文档 (architecture, ROADMAP_v0.2, simulator_manual,
 │                          #   environment_simulator_cn — 环境世界模拟器…)

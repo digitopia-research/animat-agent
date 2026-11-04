@@ -221,7 +221,11 @@ A：按彻底程度从弱到强：
 
 ## 8.1 网页调试模拟客户端（MQTT over WebSocket）
 
-除终端模拟器外，还提供了一个**纯网页版**调试客户端 `animat/simulator_web.html`，功能与终端版对等，适合无 ssh/无终端的场景，或直接用浏览器交互。
+除终端模拟器外，还提供了一个**纯网页版**控制台，位于 `webui/` 目录（入口 `webui/index.html`）。
+它比终端版多出一个 **3D 物理世界视口**：把光照、倾角、电量、LED、访客等状态实时映射到机器人身上，
+适合无 ssh/无终端的场景，或直接用浏览器交互。
+
+依赖（Three.js、MQTT.js）已内置在 `webui/vendor/`，**无需联网**，内网与离线环境同样可用。
 
 ### 启用步骤
 
@@ -242,7 +246,15 @@ A：按彻底程度从弱到强：
 
    > 当前服务器采用**方式 C（EMQX）**：`1883`（MQTT）、`18083`（管理面板）、`8083`（WebSocket）、`8084`（WSS）均已映射。浏览器面板连 `ws://<server-ip>:8083/mqtt` 即可。
 
-2. **用浏览器打开 `animat/simulator_web.html`**（双击即可，无需起服务器）。
+2. **起一个本地静态服务并打开页面**：
+
+   ```bash
+   python scripts/serve_webui.py        # 默认 http://localhost:8000/
+   python scripts/serve_webui.py 9000   # 或指定端口
+   ```
+
+   之所以需要服务而不是直接双击：浏览器在 `file://` 下对本地脚本加载与 WebSocket 连接有额外限制。
+
    页面顶部默认 broker 地址为 `ws://localhost:8083/mqtt`，与 `.env` 的 `MQTT_TRANSPORT=websockets` / `MQTT_WS_PATH=/mqtt` 对应。跨机时改成 `ws://<broker-ip>:8083/mqtt`。
 
 3. 点「连接」。状态点变绿即成功。

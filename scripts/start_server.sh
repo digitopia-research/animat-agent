@@ -10,6 +10,8 @@
 #
 # 环境变量:
 #   ANIMAT_NO_ENV_SIM=1        只起 animat，不起环境模拟器
+#   ANIMAT_NO_WEBUI=1          不起浏览器控制台
+#   ANIMAT_WEBUI_PORT=8000     浏览器控制台端口
 #   ANIMAT_ENV_SCENE=lively    环境模拟器场景密度 (quiet/normal/lively)
 #   ANIMAT_ENV_SEED=42         环境模拟器随机种子（可复现）
 #
@@ -19,8 +21,10 @@ PROJECT_DIR="/root/Workspace/animat-agent"
 LOG_DIR="/tmp"
 ANIMAT_LOG="${LOG_DIR}/animat.log"
 ENV_SIM_LOG="${LOG_DIR}/env_simulator.log"
+WEBUI_LOG="${LOG_DIR}/webui.log"
 ANIMAT_BIN="${PROJECT_DIR}/.venv/bin/animat"
 PYTHON_BIN="${PROJECT_DIR}/.venv/bin/python"
+WEBUI_PORT="${ANIMAT_WEBUI_PORT:-8000}"
 
 port_listening() {
     # $1 = 端口号
@@ -33,6 +37,10 @@ animat_running() {
 
 env_sim_running() {
     pgrep -f "animat.env_simulator" >/dev/null 2>&1
+}
+
+webui_running() {
+    pgrep -f "serve_webui.py" >/dev/null 2>&1
 }
 
 start_mosquitto() {
@@ -137,6 +145,40 @@ stop_env_sim() {
     env_sim_running && echo "[!] env_simulator 仍未停止" || echo "[ok] env_simulator 已停止"
 }
 
+start_webui() {
+    if [ "${ANIMAT_NO_WEBUI:-0}" = "1" ]; then
+        echo "[ok] 已跳过 webui (ANIMAT_NO_WEBUI=1)"
+        return
+    fi
+    if webui_running; then
+        echo "[ok] webui 已在运行 (端口 ${WEBUI_PORT})"
+        return
+    fi
+    cd "${PROJECT_DIR}"
+    echo "[..] 启动 webui（浏览器控制台）"
+    ANIMAT_WEBUI_PORT="${WEBUI_PORT}" nohup "${PYTHON_BIN}" scripts/serve_webui.py \
+        > "${WEBUI_LOG}" 2>&1 < /dev/null &
+    sleep 2
+    if webui_running; then
+        echo "[ok] webui 已启动 -> http://<本机IP>:${WEBUI_PORT}/  日志 ${WEBUI_LOG}"
+    else
+        echo "[!] webui 启动失败，日志末尾："
+        tail -n 15 "${WEBUI_LOG}" 2>/dev/null || true
+    fi
+}
+
+stop_webui() {
+    if ! webui_running; then
+        echo "[ok] webui 未运行"
+        return
+    fi
+    echo "[..] 停止 webui"
+    pkill -f "serve_webui.py" 2>/dev/null || true
+    sleep 1
+    webui_running && pkill -9 -f "serve_webui.py" 2>/dev/null || true
+    webui_running && echo "[!] webui 仍未停止" || echo "[ok] webui 已停止"
+}
+
 stop_animat() {
     if ! animat_running; then
         echo "[ok] animat 未运行"
@@ -183,12 +225,13 @@ show_status() {
     port_listening 6379 && echo "redis (6379):     监听中" || echo "redis (6379):     未监听"
     animat_running && echo "animat:          运行中" || echo "animat:          未运行"
     env_sim_running && echo "env_simulator:   运行中" || echo "env_simulator:   未运行"
+    webui_running && echo "webui:           运行中 (端口 ${WEBUI_PORT})" || echo "webui:           未运行"
 }
 
 case "${1:-start}" in
-    start)   start_mosquitto; start_redis; start_animat; start_env_sim; echo "--- 完成 ---" ;;
-    stop)    stop_animat; stop_env_sim ;;
-    restart) stop_animat; stop_env_sim; start_mosquitto; start_redis; start_animat; start_env_sim; echo "--- 完成 ---" ;;
+    start)   start_mosquitto; start_redis; start_animat; start_env_sim; start_webui; echo "--- 完成 ---" ;;
+    stop)    stop_animat; stop_env_sim; stop_webui ;;
+    restart) stop_animat; stop_env_sim; stop_webui; start_mosquitto; start_redis; start_animat; start_env_sim; start_webui; echo "--- 完成 ---" ;;
     status)  show_status ;;
     *) echo "用法: $0 {start|stop|restart|status}"; exit 1 ;;
 esac

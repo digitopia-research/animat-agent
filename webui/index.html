@@ -3,8 +3,11 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Animat 网页调试模拟客户端</title>
-<script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+<title>Animat — Embodied Consciousness Console</title>
+<!-- 依赖全部本地化（vendor/），内网与离线环境可用 -->
+<script src="vendor/mqtt.min.js"></script>
+<!-- 3D 世界视口 -->
+<script src="vendor/three.min.js"></script>
 <style>
   /* ── 设计令牌 ── */
   /* 三种显示模式：light（白天）/ dark（夜晚）/ auto（跟随系统）
@@ -448,6 +451,44 @@
   .events .stim .msgbody { color: var(--accent); }
   .events .sys .msgbody { color: var(--muted); }
   .events .warn .msgbody { color: var(--red); }
+
+  /* ── 3D 世界视口 ── */
+  .viewport-wrap { display: flex; flex-direction: column; min-height: 0; border-bottom: 1px solid var(--line); }
+  .viewport-head {
+    padding: 8px 18px; font-size: 9px; text-transform: uppercase; letter-spacing: 2px;
+    color: var(--txt-dim); font-weight: 700; display: flex; align-items: center;
+    gap: 9px; border-bottom: 1px solid var(--line);
+    background: rgba(255,255,255,.008); flex: 0 0 auto;
+  }
+  .viewport-head::before { content: ""; width: 4px; height: 4px; background: var(--accent); border-radius: 50%; }
+  .viewport-head .head-sub {
+    text-transform: none; letter-spacing: .3px; font-weight: 400;
+    color: var(--muted); font-size: 9.5px; margin-left: auto;
+  }
+  .viewport-head .cam-btn {
+    padding: 3px 9px; font-size: 8.5px; letter-spacing: 1px; border-radius: 2px;
+    margin-left: 5px;
+  }
+  .viewport { position: relative; flex: 1 1 auto; min-height: 220px; height: 34vh; overflow: hidden;
+    background: #05070b; }
+  .viewport canvas { display: block; width: 100%; height: 100%; }
+  /* 视口内的环境光晕叠加，跟随昼夜变化 */
+  .viewport::after {
+    content: ""; position: absolute; inset: 0; pointer-events: none;
+    background: radial-gradient(ellipse at 50% 0%, var(--vp-glow, transparent), transparent 62%);
+    transition: background .8s ease;
+  }
+  /* 视口状态角标 */
+  .vp-badge {
+    position: absolute; padding: 3px 9px; font-size: 8.5px; letter-spacing: 1.2px;
+    text-transform: uppercase; font-family: var(--mono); border-radius: 2px;
+    border: 1px solid var(--line-strong); background: rgba(5,7,11,.72);
+    color: var(--txt-dim); backdrop-filter: blur(6px); pointer-events: none;
+  }
+  .vp-badge.tl { top: 10px; left: 10px; }
+  .vp-badge.tr { top: 10px; right: 10px; }
+  .vp-badge .k { color: var(--muted); }
+  .vp-badge .v { color: var(--accent); font-weight: 700; }
 </style>
 </head>
 <body data-mode="auto" data-resolved="dark">
@@ -524,6 +565,21 @@
 
   <!-- 主区：对话 + 内心思考 + 事件日志 + 输入 -->
   <div class="main">
+    <!-- 3D 世界视口：把 env_simulator 注入的环境与内感映射到机器人身上 -->
+    <div class="viewport-wrap">
+      <div class="viewport-head">
+        物理世界
+        <span class="head-sub">3D viewport · 光照 / 倾角 / 电量 / LED 实时映射</span>
+        <button class="cam-btn sec" id="camTP" title="第三人称">TP</button>
+        <button class="cam-btn sec" id="camFP" title="第一人称">FP</button>
+        <button class="cam-btn sec" id="camTOP" title="俯视">TOP</button>
+      </div>
+      <div class="viewport" id="viewport">
+        <canvas id="webgl-canvas"></canvas>
+        <div class="vp-badge tl" id="vpLight"><span class="k">LIGHT</span> <span class="v">—</span></div>
+        <div class="vp-badge tr" id="vpState"><span class="k">STATE</span> <span class="v">—</span></div>
+      </div>
+    </div>
     <div class="panes">
       <!-- 左：对话窗口 -->
       <div class="pane">
@@ -607,6 +663,337 @@ function chatMsg(role, text) {
   chatEl.scrollTop = chatEl.scrollHeight;
 }
 
+// LED 颜色名 → 十六进制（与后端 LED_COLORS 保持一致）
+const LED_COLORS_HEX = {
+  red: 0xff4d4f, orange: 0xff9c2e, yellow: 0xffd93d, green: 0x4ade80,
+  cyan: 0x22d3ee, blue: 0x5b8cff, purple: 0xc084fc, white: 0xf5f7ff,
+  warm_white: 0xffe9c4, dim_blue: 0x3b5bdb, rainbow: 0xff7ab6,
+};
+
+// ═══════════════════════════════════════════════════════════
+// 3D 物理世界视口
+// 把 MQTT 上的环境/内感/效应器数据映射成可见的机器人状态：
+//   光照 → 场景主光与色温       倾角 → 车身倾斜
+//   电量 → 眼部与底盘辉光        LED  → 顶部灯带颜色/闪烁
+//   体温 → 灯带偏红             有人靠近 → 场景出现人形
+// ═══════════════════════════════════════════════════════════
+const viewport = (function initViewport() {
+  const canvas = document.getElementById("webgl-canvas");
+  if (!canvas || typeof THREE === "undefined") {
+    return { setLight() {}, setTilt() {}, setBattery() {}, setLed() {},
+             setTemp() {}, setPerson() {}, setExpression() {}, setMotion() {},
+             setSpeed() {}, setCamera() {} };
+  }
+
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x07090f);
+  scene.fog = new THREE.FogExp2(0x07090f, 0.012);
+
+  const camera = new THREE.PerspectiveCamera(55, 1, 0.1, 500);
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+  // ── 灯光 ──
+  const ambient = new THREE.AmbientLight(0x8899bb, 0.55);
+  scene.add(ambient);
+
+  const hemi = new THREE.HemisphereLight(0x99bbff, 0x0a0f18, 0.5);
+  scene.add(hemi);
+
+  // 主光：强度与色温跟随 ambient_light
+  const keyLight = new THREE.DirectionalLight(0xffffff, 1.1);
+  keyLight.position.set(18, 26, 14);
+  keyLight.castShadow = true;
+  keyLight.shadow.mapSize.width = 1024;
+  keyLight.shadow.mapSize.height = 1024;
+  keyLight.shadow.camera.near = 1;
+  keyLight.shadow.camera.far = 120;
+  const sd = 26;
+  keyLight.shadow.camera.left = -sd;
+  keyLight.shadow.camera.right = sd;
+  keyLight.shadow.camera.top = sd;
+  keyLight.shadow.camera.bottom = -sd;
+  scene.add(keyLight);
+
+  // 冷色补光与暖色轮廓光，营造科技感
+  const fillLight = new THREE.PointLight(0x2ad0ff, 0.9, 55);
+  fillLight.position.set(-16, 11, -13);
+  scene.add(fillLight);
+  const rimLight = new THREE.PointLight(0x8b5cf6, 0.7, 50);
+  rimLight.position.set(16, 9, 15);
+  scene.add(rimLight);
+
+  // ── 地面 ──
+  const FLOOR = 40;
+  const grid = new THREE.GridHelper(FLOOR, 40, 0x1e3350, 0x121c2c);
+  grid.position.y = 0.01;
+  scene.add(grid);
+
+  const floorMesh = new THREE.Mesh(
+    new THREE.PlaneGeometry(FLOOR, FLOOR),
+    new THREE.MeshStandardMaterial({ color: 0x0b1018, roughness: 0.85, metalness: 0.15 })
+  );
+  floorMesh.rotation.x = -Math.PI / 2;
+  floorMesh.receiveShadow = true;
+  scene.add(floorMesh);
+
+  // ── 机器人 ──
+  const robot = new THREE.Group();
+  scene.add(robot);
+
+  const matBody   = new THREE.MeshStandardMaterial({ color: 0x1b2537, roughness: 0.35, metalness: 0.85 });
+  const matPlate  = new THREE.MeshStandardMaterial({ color: 0x0d1420, roughness: 0.5, metalness: 0.9 });
+  const matEye    = new THREE.MeshBasicMaterial({ color: 0x3ddc97 });
+  const matGlow   = new THREE.MeshBasicMaterial({ color: 0x3ddc97 });
+
+  // 底盘
+  const chassis = new THREE.Mesh(new THREE.BoxGeometry(1.7, 0.5, 2.3), matBody);
+  chassis.position.y = 0.55;
+  chassis.castShadow = true;
+  robot.add(chassis);
+
+  // 顶板
+  const topPlate = new THREE.Mesh(new THREE.BoxGeometry(1.45, 0.12, 1.85), matPlate);
+  topPlate.position.y = 0.86;
+  topPlate.castShadow = true;
+  robot.add(topPlate);
+
+  // LED 灯带（映射 set_led 的颜色与闪烁）
+  const ledBar = new THREE.Mesh(new THREE.BoxGeometry(1.25, 0.06, 0.16), matGlow);
+  ledBar.position.set(0, 0.94, -0.62);
+  robot.add(ledBar);
+  const ledLight = new THREE.PointLight(0x3ddc97, 0.7, 9);
+  ledLight.position.set(0, 1.0, -0.62);
+  robot.add(ledLight);
+
+  // 轮子
+  const wheels = [];
+  const wheelGeo = new THREE.CylinderGeometry(0.32, 0.32, 0.26, 20);
+  wheelGeo.rotateZ(Math.PI / 2);
+  [[-0.85, 0.32, 0.72], [0.85, 0.32, 0.72], [-0.85, 0.32, -0.72], [0.85, 0.32, -0.72]]
+    .forEach(([x, y, z]) => {
+      const w = new THREE.Mesh(wheelGeo, matPlate);
+      w.position.set(x, y, z);
+      w.castShadow = true;
+      robot.add(w);
+      wheels.push(w);
+    });
+
+  // 云台 + 头
+  const turret = new THREE.Group();
+  turret.position.set(0, 1.0, -0.1);
+  robot.add(turret);
+
+  const turretBase = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.56, 0.3, 18), matBody);
+  turretBase.castShadow = true;
+  turret.add(turretBase);
+
+  const head = new THREE.Mesh(new THREE.BoxGeometry(0.72, 0.34, 0.56), matPlate);
+  head.position.set(0, 0.28, 0.06);
+  head.castShadow = true;
+  turret.add(head);
+
+  // 眼睛：亮度随电量，形状随表情
+  const eyes = [];
+  const eyeGeo = new THREE.SphereGeometry(0.075, 14, 14);
+  [-0.17, 0.17].forEach(x => {
+    const e = new THREE.Mesh(eyeGeo, matEye.clone());
+    e.position.set(x, 0.28, 0.35);
+    turret.add(e);
+    eyes.push(e);
+  });
+
+  // 天线
+  const antenna = new THREE.Mesh(new THREE.CylinderGeometry(0.015, 0.015, 0.42, 8), matPlate);
+  antenna.position.set(0.24, 0.62, -0.08);
+  turret.add(antenna);
+  const antennaTip = new THREE.Mesh(new THREE.SphereGeometry(0.045, 10, 10), matGlow.clone());
+  antennaTip.position.set(0.24, 0.85, -0.08);
+  turret.add(antennaTip);
+
+  // 投影光锥（看向前方，象征注意力）
+  const headLight = new THREE.SpotLight(0x3ddc97, 1.4, 14, Math.PI / 7, 0.6);
+  headLight.position.set(0, 0.28, 0.3);
+  headLight.target.position.set(0, 0.1, 6);
+  turret.add(headLight);
+  turret.add(headLight.target);
+
+  // ── 访客（person_approach 时出现） ──
+  // 注意：CapsuleGeometry 直到 r140 才引入，r128 没有，直接用圆柱体。
+  const visitor = new THREE.Group();
+  const vBody = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.26, 0.3, 1.15, 12),
+    new THREE.MeshStandardMaterial({ color: 0x2b3648, roughness: 0.7, metalness: 0.2 })
+  );
+  vBody.position.y = 0.78;
+  vBody.castShadow = true;
+  visitor.add(vBody);
+  const vHead = new THREE.Mesh(
+    new THREE.SphereGeometry(0.2, 14, 14),
+    new THREE.MeshStandardMaterial({ color: 0x3a4759, roughness: 0.6 })
+  );
+  vHead.position.y = 1.56;
+  vHead.castShadow = true;
+  visitor.add(vHead);
+  visitor.visible = false;
+  scene.add(visitor);
+
+  // ── 状态 ──
+  const state = {
+    light: 0.5, tilt: 0, battery: 100, temp: 37,
+    ledColor: 0x3ddc97, ledPattern: "solid", ledUntil: 0,
+    personVisible: false, personTimer: 0,
+    expr: "neutral", speed: 0, moving: false,
+    targetTilt: 0, camMode: "TP",
+  };
+
+  let t = 0;
+
+  // ── 相机 ──
+  const camTargets = {
+    TP:  { pos: new THREE.Vector3(4.2, 3.4, 5.2), look: new THREE.Vector3(0, 0.9, 0) },
+    FP:  { pos: new THREE.Vector3(0, 1.35, 0.45), look: new THREE.Vector3(0, 1.1, 6) },
+    TOP: { pos: new THREE.Vector3(0, 8.5, 0.01), look: new THREE.Vector3(0, 0, 0) },
+  };
+  const camPos = camTargets.TP.pos.clone();
+  const camLook = camTargets.TP.look.clone();
+
+  function resize() {
+    const w = viewportEl.clientWidth || 1;
+    const h = viewportEl.clientHeight || 1;
+    renderer.setSize(w, h, false);
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+  }
+  const viewportEl = document.getElementById("viewport");
+  window.addEventListener("resize", resize);
+
+  // ── 主循环 ──
+  function animate() {
+    requestAnimationFrame(animate);
+    t += 0.016;
+
+    // 相机平滑跟随
+    const target = camTargets[state.camMode];
+    const k = state.camMode === "FP" ? 0.5 : 0.08;
+    camPos.lerp(target.pos, k);
+    camLook.lerp(target.look, k);
+    camera.position.copy(camPos);
+    camera.position.y += Math.sin(t * 1.6) * 0.012;   // 轻微呼吸
+    camera.lookAt(camLook);
+
+    // 车身倾斜（映射 imu_tilt_deg）
+    robot.rotation.z += ((state.targetTilt * Math.PI / 180) - robot.rotation.z) * 0.12;
+    // 云台缓慢扫视
+    turret.rotation.y = Math.sin(t * 0.42) * 0.45;
+    // 天线轻晃
+    antenna.rotation.z = Math.sin(t * 2.1) * 0.09;
+
+    // LED 闪烁
+    const ledActive = performance.now() < state.ledUntil;
+    let ledVisible = ledActive;
+    if (ledActive) {
+      if (state.ledPattern === "flash")      ledVisible = Math.floor(t * 6) % 2 === 0;
+      else if (state.ledPattern === "slow_blink") ledVisible = Math.floor(t * 1.4) % 2 === 0;
+      else if (state.ledPattern === "sparkle")    ledVisible = Math.random() > 0.35;
+      else if (state.ledPattern === "pulse" || state.ledPattern === "slow_breath"
+               || state.ledPattern === "wave" || state.ledPattern === "gentle_pulse")
+        ledVisible = 0.55 + 0.45 * Math.sin(t * (state.ledPattern === "slow_breath" ? 1.1 : 3.2));
+    } else {
+      // 熄灭态：微弱的呼吸绿，表示还在运转
+      ledVisible = 0.14 + 0.06 * Math.sin(t * 1.3);
+    }
+    matGlow.color.setHex(state.ledColor);
+    matGlow.color.multiplyScalar(ledVisible === true ? 1 : (ledVisible === false ? 0.06 : ledVisible));
+    ledLight.intensity = (ledVisible === true ? 1.1 : (ledVisible === false ? 0.05 : ledVisible * 1.1));
+
+    // 眼睛亮度随电量；低于 20% 转红闪烁
+    const lowBat = state.battery < 20;
+    const eyePulse = lowBat ? (0.35 + 0.65 * (Math.floor(t * 2.4) % 2)) : (0.75 + 0.25 * Math.sin(t * 1.8));
+    const eyeHex = lowBat ? 0xff5f5f : state.ledColor;
+    eyes.forEach(e => {
+      e.material.color.setHex(eyeHex);
+      e.material.color.multiplyScalar(eyePulse);
+    });
+    headLight.color.setHex(eyeHex);
+    headLight.intensity = 0.5 + eyePulse * 1.1;
+
+    // 表情：调整眼的纵向缩放
+    const eyeScaleY = state.expr === "happy" ? 0.45
+                    : state.expr === "surprised" ? 1.5
+                    : state.expr === "sleepy" ? 0.3
+                    : state.expr === "sad" ? 0.6 : 1.0;
+    eyes.forEach(e => { e.scale.y += (eyeScaleY - e.scale.y) * 0.15; });
+
+    // 移动时轮子转动、车身轻微上下颠
+    const spin = state.moving ? t * 9 : 0;
+    wheels.forEach(w => { w.rotation.x = spin; });
+    robot.position.y = state.moving ? Math.abs(Math.sin(t * 11)) * 0.035 : 0;
+
+    // 访客淡入淡出
+    if (state.personVisible) {
+      if (!visitor.visible) visitor.visible = true;
+      visitor.position.set(3.1, 0, 2.4);
+      visitor.position.y += Math.sin(t * 1.4) * 0.012;
+    } else if (visitor.visible) {
+      visitor.position.y -= 0.06;
+      if (visitor.position.y < -2) visitor.visible = false;
+    }
+
+    // 环境光映射：光照 0→几乎全暗，1→明亮
+    const L = Math.max(0.02, Math.min(1, state.light));
+    ambient.intensity = 0.12 + 0.62 * L;
+    hemi.intensity = 0.1 + 0.45 * L;
+    keyLight.intensity = 0.15 + 1.35 * L;
+    // 色温：白天偏冷白，夜晚偏蓝
+    const warm = 0.55 + 0.45 * L;
+    keyLight.color.setRGB(warm, warm, 1.0);
+    scene.background.setRGB(0.028 * (0.4 + L), 0.035 * (0.5 + L), 0.055 * (0.7 + L));
+
+    renderer.render(scene, camera);
+  }
+
+  // 首次尺寸与启动
+  setTimeout(resize, 0);
+  animate();
+
+  // ── 对外接口 ──
+  return {
+    setLight(level) {
+      if (typeof level === "number") {
+        state.light = Math.max(0, Math.min(1, level));
+        const el = document.getElementById("vpLight");
+        if (el) el.querySelector(".v").textContent =
+          state.light.toFixed(2) + (state.light > 0.6 ? " DAY" : state.light > 0.25 ? " DUSK" : " NIGHT");
+        document.getElementById("viewport").style.setProperty(
+          "--vp-glow",
+          `rgba(${state.light > 0.5 ? "120,200,255" : "80,120,220"},${0.05 + state.light * 0.16})`
+        );
+      }
+    },
+    setTilt(deg) { if (typeof deg === "number") state.targetTilt = Math.max(-12, Math.min(12, deg)); },
+    setBattery(pct) { if (typeof pct === "number") state.battery = pct; },
+    setTemp(c) { if (typeof c === "number") state.temp = c; },
+    setLed(color, pattern, ms) {
+      state.ledColor = LED_COLORS_HEX[color] || 0x3ddc97;
+      state.ledPattern = pattern || "solid";
+      state.ledUntil = performance.now() + (ms || 3000);
+      const el = document.getElementById("vpState");
+      if (el) el.querySelector(".v").textContent = (color || "white").toUpperCase();
+    },
+    setPerson(on) { state.personVisible = !!on; },
+    setExpression(name) { if (name) state.expr = name; },
+    setMotion(moving) { state.moving = !!moving; },
+    setCamera(mode) { if (camTargets[mode]) state.camMode = mode; },
+  };
+})();
+
+document.getElementById("camTP").onclick  = () => viewport.setCamera("TP");
+document.getElementById("camFP").onclick  = () => viewport.setCamera("FP");
+document.getElementById("camTOP").onclick = () => viewport.setCamera("TOP");
+
 // ───────── 世界输入（animat/sensor/*）─────────
 const envlogBox = document.getElementById("envlogBox");
 const stScene = document.getElementById("stScene");
@@ -656,11 +1043,28 @@ function renderEnvEvent(modality, data) {
       bar.style.width = Math.max(0, Math.min(100, b)) + "%";
       bar.style.background = b < 20 ? "var(--red)" : b < 40 ? "var(--yellow)" : "var(--green)";
     }
-    if (data.temperature != null) stTemp.textContent = Number(data.temperature).toFixed(1) + "°C";
-    if (data.imu_tilt_deg != null) stTilt.textContent = Number(data.imu_tilt_deg).toFixed(1) + "°";
+    if (data.temperature != null) {
+      stTemp.textContent = Number(data.temperature).toFixed(1) + "°C";
+      viewport.setTemp(Number(data.temperature));
+    }
+    if (data.imu_tilt_deg != null) {
+      stTilt.textContent = Number(data.imu_tilt_deg).toFixed(1) + "°";
+      viewport.setTilt(Number(data.imu_tilt_deg));      // 车身倾斜
+    }
     if (data.charging != null) stCharge.textContent = data.charging ? "是 ⚡" : "否";
 
+    // 映射到 3D 场景
+    if (data.ambient_light != null) viewport.setLight(Number(data.ambient_light));
+    if (data.battery_pct != null) viewport.setBattery(Number(data.battery_pct));
+
     if (!data.event) return;   // 没有显式事件就别进事件流
+  }
+
+  // 视觉事件也映射到 3D（有人靠近/离开、光线变化）
+  if (modality === "vision") {
+    if (data.event === "person_approach") viewport.setPerson(true);
+    else if (data.event === "person_leave") viewport.setPerson(false);
+    if (data.ambient_light != null) viewport.setLight(Number(data.ambient_light));
   }
 
   stLastEvent.textContent = text.length > 18 ? text.slice(0, 18) + "…" : text;
@@ -800,6 +1204,7 @@ function onMessage(topic, payload) {
   // ── 效应器通路（LLM 工具调用）──
   if (topic === TOPIC.EFFECTOR_LED) {
     applyLed(data);
+    viewport.setLed(data.color, data.pattern, data.duration_ms);
     log("💡 LED: " + (data.color || "?") + " / " + (data.pattern || "solid")
         + " (" + (data.duration_ms || 3000) + "ms)", "motor");
     return;
@@ -808,6 +1213,7 @@ function onMessage(topic, payload) {
     const emo = data.emotion || "?";
     const inten = data.intensity != null ? Number(data.intensity).toFixed(2) : "—";
     stExpr.textContent = emo + " (" + inten + ")";
+    viewport.setExpression(emo);
     log("😊 表情: " + emo + " 强度 " + inten, "motor");
     return;
   }
@@ -822,6 +1228,12 @@ function onMessage(topic, payload) {
   if (topic === TOPIC.MOTOR) {
     const cmd = data.command || "?";
     const params = data.params || {};
+    // 移动指令驱动 3D 轮子与车身起伏
+    if (cmd === "move") {
+      viewport.setMotion(true);
+      clearTimeout(window.__moveTimer);
+      window.__moveTimer = setTimeout(() => viewport.setMotion(false), 1600);
+    }
     if (cmd === "speak") {
       // 只有真正说出口的话才进对话窗口。空文本（独白被静默）直接忽略，
       // 否则会在对话窗里留下空气泡。
@@ -922,6 +1334,29 @@ function looksLikePinyinGarbage(text) {
   return latinCharCount >= 4 && (hanCount === 0 || hanCount / total < 0.3);
 }
 
+// ───────── 本地存储（带可用性探测）─────────
+// 浏览器的"跟踪防护"/无痕模式会拦截 localStorage，每次访问都会在控制台
+// 打印一条 Tracking Prevention 警告。这里先探测一次，不可用就退化为
+// 内存存储，之后不再触碰 localStorage，避免刷屏。
+const store = (function probeStorage() {
+  try {
+    const k = "__animat_probe__";
+    localStorage.setItem(k, "1");
+    localStorage.removeItem(k);
+    return {
+      get(key) { try { return localStorage.getItem(key); } catch (e) { return null; } },
+      set(key, val) { try { localStorage.setItem(key, val); } catch (e) { /* ignore */ } },
+    };
+  } catch (e) {
+    // 存储不可用：静默降级，设置仅在本次会话内有效
+    const mem = Object.create(null);
+    return {
+      get(key) { return mem[key] ?? null; },
+      set(key, val) { mem[key] = val; },
+    };
+  }
+})();
+
 // ───────── 显示模式：白天 / 夜晚 / 跟随系统 ─────────
 const MODE_KEY = "animat_display_mode";
 const MODES = ["auto", "light", "dark"];
@@ -949,7 +1384,7 @@ function applyMode(mode, persist) {
     b.classList.toggle("active", b.dataset.m === mode));
 
   if (persist) {
-    try { localStorage.setItem(MODE_KEY, mode); } catch (e) { /* 隐私模式忽略 */ }
+    store.set(MODE_KEY, mode);
   }
 }
 
@@ -966,8 +1401,7 @@ if (mql) {
 
 // 启动时恢复上次选择，默认跟随系统
 (function initMode() {
-  let saved = null;
-  try { saved = localStorage.getItem(MODE_KEY); } catch (e) { /* ignore */ }
+  const saved = store.get(MODE_KEY);
   applyMode(saved || "auto", false);
 })();
 

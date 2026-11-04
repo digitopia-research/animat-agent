@@ -377,7 +377,7 @@ Simulator control commands:
   /help    — list commands
 ```
 
-A browser-based alternative is `animat/simulator_web.html` — open it and connect to `ws://<host>:8083/mqtt` to watch the thought stream, send stimuli, and chat (see `docs/simulator_manual.md`).
+A browser-based alternative lives in `webui/` — serve it with `python scripts/serve_webui.py` and open `http://localhost:8000/`, then connect to `ws://<host>:8083/mqtt` to watch the 3D world view, the thought stream, and chat (see `docs/simulator_manual.md`).
 
 ---
 
@@ -422,8 +422,12 @@ animat-agent/
 │   │   ├── registry.py              #   Whitelist, arg validation, rate limits, MQTT dispatch
 │   │   ├── effector.py              #   Actuator tools (all publish to animat/effector/*)
 │   │   └── knowledge.py             #   web_search (DeepSeek search API)
-│   ├── simulator.py                 # MQTT sensor simulator (interactive)
-│   └── simulator_web.html           # Browser WebSocket control panel
+│   └── simulator.py                 # MQTT sensor simulator (interactive)
+│
+├── webui/                           # Browser console (3D world view + chat)
+│   ├── index.html                   #   main page (was animat/simulator_web.html)
+│   ├── vendor/                      #   three.min.js, mqtt.min.js (bundled, offline-ready)
+│   └── ...
 │
 ├── scripts/                         # Verification & demo scripts
 │   ├── demo_stream_cortex.py        # Phase 1: continuous thought stream
