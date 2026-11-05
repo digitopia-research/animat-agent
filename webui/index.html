@@ -649,6 +649,12 @@
       <div class="section-body">
         <div class="stats">
           <div class="stat-row"><span>链路</span><span class="stat-val" id="stLink">—</span></div>
+          <!-- 意识流健康度：LLM 调用是阻塞的，卡住时进程看着还活着但不再思考。
+               放在链路下面第二行，因为这是判断"它还醒着吗"的第一依据。 -->
+          <div class="stat-row">
+            <span>意识流</span>
+            <span class="stat-val" id="stCortex">—</span>
+          </div>
           <div class="stat-row"><span>主导情绪</span><span class="stat-val" id="stEmotion">—</span></div>
           <div class="stat-row"><span>情绪强度</span><span class="stat-val" id="stEmoInt">—</span></div>
           <div class="stat-row"><span>驱力</span><span class="stat-val" id="stDrive">—</span></div>
@@ -1862,11 +1868,54 @@ function vitalColor(v) {
   if (v < (VITAL_SAFE[arguments[1]] || 30)) return "var(--yellow)";
   return "var(--green)";
 }
+// 最后一次收到 animat/state 的时刻。心跳每秒一条，超过阈值没收到就说明
+// 进程侧已经不能广播了——此时后端发来的 cortex 字段也一并停止更新，
+// 所以必须由前端自己计时，不能只信 payload 里的内容。
+let lastStateAt = 0;
+
+function renderCortex(s) {
+  const el = document.getElementById("stCortex");
+  if (!el) return;
+  const c = s.cortex || {};
+  const since = (typeof c.since_last_think_sec === "number") ? c.since_last_think_sec : null;
+
+  if (c.alive === false) {
+    // 后端自己已经判定停滞（有推理完成时间戳，但超时太久）
+    el.textContent = "⚠ 停滞" + (since != null ? " " + Math.round(since) + "s" : "");
+    el.style.color = "var(--red)";
+    return;
+  }
+  if (since == null) { el.textContent = "—"; el.style.color = ""; return; }
+
+  // 正常：显示"思考中 Ns"，超过 45 秒转黄提示（可能是长独白，也可能是要出事）
+  if (since > 45) {
+    el.textContent = "迟缓 " + Math.round(since) + "s";
+    el.style.color = "var(--yellow)";
+  } else {
+    el.textContent = "● 活跃 " + Math.round(since) + "s";
+    el.style.color = "var(--green)";
+  }
+}
+
+// 前端侧的兜底探测：后端整个卡死时不会再发 state，
+// 靠本地计时把"沉默"和"健康"区分开。
+setInterval(() => {
+  const el = document.getElementById("stCortex");
+  if (!el || !lastStateAt) return;
+  const silent = (Date.now() - lastStateAt) / 1000;
+  if (silent > 10) {
+    el.textContent = "⚠ 无心跳 " + Math.round(silent) + "s";
+    el.style.color = "var(--red)";
+  }
+}, 3000);
+
 function renderAnimatState(s) {
   if (!s || typeof s !== "object") return;
   const set = (id, txt) => { const e = document.getElementById(id); if (e) e.textContent = txt; };
   set("stLink", "✔ 已连接");
   document.getElementById("stLink").style.color = "var(--green)";
+  lastStateAt = Date.now();
+  renderCortex(s);
 
   const emo = (s.emotion && s.emotion.dominant) || "—";
   set("stEmotion", emo);
