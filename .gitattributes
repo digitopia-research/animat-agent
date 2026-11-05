@@ -1,0 +1,27 @@
+# 统一换行符，避免在 Windows 上反复出现
+#   "LF will be replaced by CRLF the next time Git touches it"
+#
+# 默认：仓库内一律存 LF，检出时按平台自动转换。
+# 项目跑在 Linux 服务器上，shell 脚本必须保持 LF——带 CR 的
+# start_server.sh 会让 bash 报 "$'\r': command not found"。
+* text=auto eol=lf
+
+# 这些文件在任何平台上都必须是 CRLF 才能正常工作
+*.bat           text eol=crlf
+*.cmd           text eol=crlf
+*.ps1           text eol=crlf
+
+# 二进制文件不参与任何转换
+*.gguf          binary
+*.png           binary
+*.jpg           binary
+*.jpeg          binary
+*.gif           binary
+*.ico           binary
+*.webp          binary
+*.woff          binary
+*.woff2         binary
+*.ttf           binary
+
+# vendor 下的压缩 JS 是构建产物，不做行尾处理以免破坏内容
+webui/vendor/*.js   -text
