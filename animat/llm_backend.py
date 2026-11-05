@@ -191,6 +191,9 @@ class StreamThought:
     accumulated_text: str
     is_finished: bool = False
     finish_reason: Optional[str] = None
+    # 未经剥离的原始累加输出。诊断用：当 accumulated_text 为空时，
+    # 可以据此区分"模型真的没生成"和"生成了但全在 <think> 里被剥离"。
+    raw_text: str = ""
     # 仅在流结束时填充：模型请求的工具调用（OpenAI tool_calls 格式）
     tool_calls: list = field(default_factory=list)
 
@@ -298,27 +301,54 @@ class LocalLLM:
         return response
 
     def _create_chat_completion(self, **kwargs):
-        """封装 llama_cpp 的 create_chat_completion。
+        """封装 llama_cpp 的 create_chat_completion，并关闭 Qwen3 思考模式。
 
-        优先用 enable_thinking=False 关闭 Qwen3 的思考模式；若所用模型的
-        chat 模板不支持该参数（抛错），则去掉该参数重试，确保仍能推理。
+        关于 enable_thinking 的一段历史：
+        早先这里用 chat_template_kwargs={"enable_thinking": False} 注入，
+        但 llama-cpp-python 0.3.x 的 create_chat_completion() 根本不接受
+        这个参数，每次都会抛 TypeError，然后被 except 吞掉、剔除参数重试。
+        实际结果是"看起来关了思考，其实一直开着"——模型每轮生成四五百
+        字符全在 <think> 里，被 _strip_thinking 剥离后正文为空，
+        表现为日志里 out=0ch 而 raw=471ch，意识流"静悄悄"。
+
+        Qwen3 模板真正认的是消息里的 /no_think 软开关，且必须放在
+        最后一条 user 消息末尾（放 system 里无效，实测仍会思考）。
+        这里统一追加，比依赖模板变量更可靠。
         """
-        kwargs.setdefault("chat_template_kwargs", {"enable_thinking": False})
+        kwargs["messages"] = self._apply_no_think(kwargs.get("messages") or [])
+
         try:
             return self._llm.create_chat_completion(**kwargs)
-        except (TypeError, ValueError, KeyError, RuntimeError):
-            kwargs.pop("chat_template_kwargs", None)
-            try:
+        except Exception as e:
+            # 只有"模板不认识 tools 参数"才降级；上下文溢出等错误
+            # 必须原样抛出，否则会被误判成模板不支持，掩盖真正的问题。
+            if "tools" in kwargs and "context" not in str(e).lower():
+                logger.warning("当前模型的 chat 模板不支持 tools，本轮退化为纯文本输出")
+                kwargs.pop("tools", None)
+                kwargs.pop("tool_choice", None)
                 return self._llm.create_chat_completion(**kwargs)
-            except Exception as e:
-                # 只有"模板不认识 tools 参数"才降级；上下文溢出等错误
-                # 必须原样抛出，否则会被误判成模板不支持，掩盖真正的问题。
-                if "tools" in kwargs and "context" not in str(e).lower():
-                    logger.warning("当前模型的 chat 模板不支持 tools，本轮退化为纯文本输出")
-                    kwargs.pop("tools", None)
-                    kwargs.pop("tool_choice", None)
-                    return self._llm.create_chat_completion(**kwargs)
-                raise
+            raise
+
+    @staticmethod
+    def _apply_no_think(messages: list[dict]) -> list[dict]:
+        """在最后一条 user 消息末尾追加 /no_think。
+
+        - 已经在末尾的不重复添加
+        - 没有 user 消息时不动（例如只有 system 的一次性调用）
+        - 不改原列表，避免同一份 messages 被多次调用时叠加出一串 /no_think
+        """
+        if not messages:
+            return messages
+        out = [dict(m) for m in messages]
+        for i in range(len(out) - 1, -1, -1):
+            if out[i].get("role") != "user":
+                continue
+            content = out[i].get("content") or ""
+            if "/no_think" in content:
+                return out
+            out[i]["content"] = content.rstrip() + "\n/no_think"
+            return out
+        return out
 
     def stream_complete(
         self,
@@ -352,6 +382,9 @@ class LocalLLM:
         stream = self._create_chat_completion(**kwargs)
         accumulated = ""
         last_stripped = ""
+        # 是否已经向调用方发出过任何片段。用于流结束时判断要不要补发终止片段
+        # （模型整轮只输出 <think> 时，中间所有 yield 都会被 new_part 为空跳过）。
+        yielded_any = False
         # 流式 tool_calls 是分片到达的：按 index 累积 name 与 arguments 片段
         pending_calls: dict[int, dict] = {}
         for chunk in stream:
@@ -385,6 +418,7 @@ class LocalLLM:
             if not new_part:
                 continue
             finish_reason = choice.get("finish_reason")
+            yielded_any = True
             yield StreamThought(
                 token_text=new_part,
                 token_id=-1,  # llama-cpp-python stream 不提供 token_id
@@ -410,6 +444,27 @@ class LocalLLM:
                 is_finished=True,
                 finish_reason="tool_calls",
                 tool_calls=[pending_calls[i] for i in sorted(pending_calls)],
+            )
+            return
+
+        # 兜底：流已经结束，但一个片段都没发出去过。
+        #
+        # 触发条件很常见——模型这一轮整段输出都在 <think> 里，或者只输出了
+        # 被剥掉的控制标签。上面每个分支都靠 new_part 非空才 yield，
+        # 这种情况下生成器静默返回空迭代，调用方拿到的 accumulated 是初始
+        # 值 ""，于是"模型明明跑了 6 秒"和"什么都没生成"在外观上完全一致
+        # （实测日志表现为 out=0ch）。
+        #
+        # 这里补发一个终止片段，把真实的生成结果交出去：raw 是未剥离的
+        # 原始累加，上层据此可以判断"确实有输出但都是内部思考"。
+        if not yielded_any:
+            yield StreamThought(
+                token_text="",
+                token_id=-1,
+                accumulated_text=_strip_tool_call_partial(_strip_thinking(accumulated)),
+                is_finished=True,
+                finish_reason="stop",
+                raw_text=accumulated,
             )
 
     def stream_think(

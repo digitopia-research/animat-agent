@@ -93,6 +93,8 @@ class PerceptionLayer:
         self._prev_sensor_data: dict[str, dict] = {}
         self._last_human_detected: Optional[float] = None
         self._prev_battery: float = 100.0
+        # 感受日志的最后打印时刻（按类型），用于抑制重复刷屏
+        self._feeling_log_at: dict[str, float] = {}
 
     async def register(self):
         """注册所有感觉神经末梢"""
@@ -111,8 +113,23 @@ class PerceptionLayer:
         return derivative
 
     # ── 发布感受（保留，边缘系统仍需要）──
+    # 日志去重：同一种感受在短时间内重复触发时不再打印。
+    # 内感每 2 秒上报一次，充电期间每帧电量都在涨，"recharging" 会
+    # 每 2 秒刷一条，把意识流日志整个淹掉——排查思维问题时根本看不到
+    # 下面的内容。这里只抑制日志， Feeling 本身照常发布，
+    # 边缘系统与情感仲裁的行为完全不变。
+    _FEELING_LOG_INTERVAL = 30.0
+
     async def _emit_feeling(self, feeling: Feeling):
-        logger.info(f"Feeling: {feeling.type.value} @ {feeling.intensity:.2f} from {feeling.source}")
+        now = time.time()
+        key = feeling.type.value
+        last = self._feeling_log_at.get(key, 0.0)
+        if now - last >= self._FEELING_LOG_INTERVAL:
+            self._feeling_log_at[key] = now
+            logger.info(
+                "Feeling: %s @ %.2f from %s",
+                key, feeling.intensity, feeling.source,
+            )
         # 感受是"尽力而为"的遥测：MQTT 瞬时拥堵/超时不应让上游传感器
         # handler 整体报错（否则内感/视觉等订阅会因一次 publish 失败而中断）。
         try:

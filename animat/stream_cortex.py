@@ -549,12 +549,13 @@ class StreamCortex:
         #   think  = 一次 LLM 调用的实际耗时
         #   total  = 本轮从开始到进入睡眠的总时长
         cycle_ms = (time.time() - cycle_t0) * 1000
-        if external_text or think_ms > 3000:
-            logger.info(
-                "⏱ latency: kind=%s queue=%.2fs think=%.2fs cycle=%.2fs sleep=%.1fs",
-                "external" if external_text else "spontaneous",
-                queue_delay, think_ms / 1000, cycle_ms / 1000, wait_sec,
-            )
+        # 每轮都记。此前只在 external 或 think>3s 时打印，导致安静的
+        # 自发思维完全不可见，看起来像"意识流停了"。
+        logger.info(
+            "⏱ latency: kind=%s queue=%.2fs think=%.2fs cycle=%.2fs sleep=%.1fs",
+            "external" if external_text else "spontaneous",
+            queue_delay, think_ms / 1000, cycle_ms / 1000, wait_sec,
+        )
 
         # 睡眠由主循环统一负责，以便被外部输入打断。
         # 这里只把本轮的间隔需求交回去。
@@ -566,9 +567,24 @@ class StreamCortex:
     # MQTT 消息全部堆积、看门狗也一起失联——实测表现为进程 57% CPU、
     # GPU 0%、日志静默但进程还在。所有推理一律经这两个方法丢进线程池。
 
-    async def _llm_complete(self, **kwargs) -> dict:
-        """阻塞式 complete 的异步封装。"""
-        return await asyncio.to_thread(self.llm.complete, **kwargs)
+    async def _llm_complete(self, label: str = "complete", **kwargs) -> dict:
+        """阻塞式 complete 的异步封装，带调用日志。
+
+        label 只用于日志，不会传给后端——它的作用是让日志能区分
+        "回复"、"工具结果回注"、"只说不做重试"这几种不同用途的调用。
+        """
+        t0 = time.time()
+        try:
+            return await asyncio.to_thread(self.llm.complete, **kwargs)
+        except Exception:
+            logger.error("🤖 LLM %s 调用失败 (%.2fs)", label, time.time() - t0)
+            raise
+        finally:
+            # 无论成功失败都记一行，这样"模型到底有没有被调用过"永远可查。
+            logger.info(
+                "🤖 LLM %s: max_tokens=%s msgs=%d",
+                label, kwargs.get("max_tokens"), len(kwargs.get("messages") or []),
+            )
 
     def _consume_stream_think(self, kwargs: dict) -> tuple[str, list[dict]]:
         """消费 stream_think 生成器直到结束，返回 (累积正文, tool_calls)。
@@ -576,13 +592,25 @@ class StreamCortex:
         作为同步函数交给 asyncio.to_thread 执行；生成器本身是同步的，
         在线程里迭代不会影响事件循环。
         """
-        accumulated, collected = "", []
-        for chunk in self.llm.stream_think(**kwargs):
-            accumulated = chunk.accumulated_text
-            if chunk.tool_calls:
-                collected = chunk.tool_calls
-            if chunk.is_finished:
-                break
+        t0 = time.time()
+        accumulated, collected, raw_len = "", [], 0
+        try:
+            for chunk in self.llm.stream_think(**kwargs):
+                accumulated = chunk.accumulated_text
+                raw_len = max(raw_len, len(getattr(chunk, "raw_text", "") or ""))
+                if chunk.tool_calls:
+                    collected = chunk.tool_calls
+                if chunk.is_finished:
+                    break
+        finally:
+            # 自发思维走的是这条流式路径，若不记录，日志里就完全看不到
+            # "模型被调用过"。
+            # raw= 是剥离前的原始长度：out=0ch 且 raw>0 说明模型生成的内容
+            # 全在 <think> 里；raw 也是 0 才是真的什么都没生成。
+            logger.info(
+                "🤖 LLM think: %.2fs out=%dch raw=%dch tools=%d",
+                time.time() - t0, len(accumulated or ""), raw_len, len(collected),
+            )
         return accumulated, collected
 
     async def _think_spontaneous(self, system_prompt: str) -> Optional[Thought]:
@@ -670,6 +698,12 @@ class StreamCortex:
                 return None
 
         if not accumulated.strip():
+            # 模型这轮什么都没说（常见于只输出了 <intent>/<did> 等控制标签，
+            # 剥离后为空）。此前这里静默 return None，调用方也只静默返回 5.0，
+            # 结果是"明明每 5 秒都在推理，日志里却一条都没有"，从外部完全
+            # 无法区分"安静"和"死了"。记一条 DEBUG 保证可观测，
+            # 但不升到 INFO——安静期刷屏同样会把日志淹掉。
+            logger.debug("spontaneous: empty output, skipped")
             return None
 
         # 模型按 prompt 输出 <intent>…</intent> + 正文，这里解析出意图
@@ -739,6 +773,7 @@ class StreamCortex:
         tool_calls: list[dict] = []
         try:
             response = await self._llm_complete(
+                label="reply",
                 messages=messages,
                 max_tokens=self.MAX_REPLY_TOKENS,
                 tools=self._enabled_tools(),
@@ -768,6 +803,7 @@ class StreamCortex:
             })
             try:
                 forced = await self._llm_complete(
+                    label="did-retry",
                     messages=messages,
                     max_tokens=self.MAX_REPLY_TOKENS,
                     tools=self._enabled_tools(),
@@ -799,6 +835,7 @@ class StreamCortex:
             retry_t0 = time.time()
             try:
                 retry = await self._llm_complete(
+                    label="context-retry",
                     messages=messages,
                     max_tokens=self.MAX_REPLY_TOKENS,
                 )
@@ -844,6 +881,7 @@ class StreamCortex:
                 f"句子：{text}"
             )
             resp = await self._llm_complete(
+                label="self-info",
                 messages=[{"role": "system", "content": prompt}],
                 max_tokens=80,
             )
