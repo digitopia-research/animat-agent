@@ -345,39 +345,29 @@ Run any demo:
 python3 scripts/demo_stream_cortex.py
 ```
 
-### Sensor Simulator
+### Simulators
 
-For testing with simulated hardware (the full MQTT + Redis stack must be running first):
+Two simulators stand in for hardware, split by what they represent:
+
+| Module | Represents | Publishes | Console |
+|---|---|---|---|
+| `animat/simulators/bot_simulator.py` | the robot's **body** | battery, temperature, charging, tilt | `webui/body.html` |
+| `animat/simulators/env_simulator.py` | the robot's **world** | daylight, ambient light, noise, passers-by | `webui/world.html` |
+
+They never write the same interoception fields, so a reading on screen always
+belongs to exactly one of them.
 
 ```bash
-# From the server where Animat Agent is running:
-uv run python -m animat.simulator
-
-# Or headless auto-stimulation mode (random touch/vision) for observing autonomous reactions:
-ANIMAT_SIM_AUTO_STIM=1 uv run python -m animat.simulator
+uv run python -m animat.simulators.bot_simulator
+uv run python -m animat.simulators.env_simulator
 ```
 
-The simulator publishes mock sensor data (battery decay, random touch, human detection) to MQTT and provides an interactive input window. Free-text input is published to `animat/external/speech` (treated as human conversation). The following slash-commands inject specific stimuli:
+Neither has a terminal interface; both are controlled over MQTT
+(`animat/body/control`, `animat/env/control`) by their respective web consoles.
+See `docs/simulator_manual.md` and `docs/environment_simulator_cn.md`.
 
-```
-Stimulus commands (published to the main Animat):
-  /touch     — gentle caress (low pressure + capacitance) → CARE / comfort
-  /hit       — sudden impact (sharp pressure spike) → pain → withdraw reflex (bypasses LLM)
-  /approach  — a person approaches (1.5m, frontal gaze) → affiliation shift
-  /leave     — the person leaves (10m) → loneliness / separation
-  /noise     — loud bang (dB spike > 85) → startle → flinch reflex
-  /battery N — set battery to N% (e.g. /battery 15) → survival crisis
-  /temp N    — set body temperature to N°C (e.g. /temp 43) → overheating anxiety
-
-Simulator control commands:
-  /charge  — start charging
-  /stop    — stop charging
-  /reset   — reset battery to 100%
-  /status  — show current state
-  /help    — list commands
-```
-
-A browser-based alternative lives in `webui/` — serve it with `python scripts/serve_webui.py` and open `http://localhost:8000/`, then connect to `ws://<host>:8083/mqtt` to watch the 3D world view, the thought stream, and chat (see `docs/simulator_manual.md`).
+The browsers live in `webui/` — serve with `python scripts/serve_webui.py` and
+open `http://localhost:8000/`, then connect to `ws://<host>:8083/mqtt`.
 
 ---
 
@@ -422,10 +412,14 @@ animat-agent/
 │   │   ├── registry.py              #   Whitelist, arg validation, rate limits, MQTT dispatch
 │   │   ├── effector.py              #   Actuator tools (all publish to animat/effector/*)
 │   │   └── knowledge.py             #   web_search (DeepSeek search API)
-│   └── simulator.py                 # MQTT sensor simulator (interactive)
+│   └── simulators/                  # Stand-ins for hardware (not part of the agent itself)
+│       ├── bot_simulator.py         #   body: battery, temperature, charging
+│       └── env_simulator.py         #   world: daylight, ambient events
 │
-├── webui/                           # Browser console (3D world view + chat)
-│   ├── index.html                   #   main page (was animat/simulator_web.html)
+├── webui/                           # Browser consoles
+│   ├── index.html                   #   monitor: 3D world view, thought stream, chat (read-only)
+│   ├── world.html                   #   world console: inject environmental events
+│   ├── body.html                    #   body console: battery, temperature, charging
 │   ├── vendor/                      #   three.min.js, mqtt.min.js (bundled, offline-ready)
 │   └── ...
 │

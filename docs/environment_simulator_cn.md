@@ -1,7 +1,7 @@
 # 环境世界模拟器（env_simulator）
 
-> 适用模块：`animat/env_simulator.py`
-> 相关模块：`animat/simulator.py`（调试用传感器模拟器）、`animat/sensor_window.py`（感知窗口）
+> 适用模块：`animat/simulators/env_simulator.py`
+> 相关模块：`animat/simulators/bot_simulator.py`（身体模拟器）、`animat/sensor_window.py`（感知窗口）
 
 ---
 
@@ -51,26 +51,26 @@ Animat 曾把恒定的 37°C 正常体温编成"探索系统过热，我快烧�
 
 ### 2.1 定位：环境是"世界"，不是"调试工具"
 
-与现有 `simulator.py` 明确分工：
+与 `bot_simulator` 明确分工：
 
-| | `simulator.py` | `env_simulator.py` |
+| | `bot_simulator` | `env_simulator` |
 |---|---|---|
-| 角色 | 调试工具 | 世界本身 |
-| 行为 | 手动刺激（`/touch` `/hit`）、电量控制、动作回显 | 昼夜节律 + 随机事件持续注入 |
-| 是否自动 | 默认手动 | 默认自动 |
-| 类比 | 实验室里的注射器 | 户外的天气 |
+| 角色 | 身体 | 世界本身 |
+| 行为 | 电量 / 体温 / 充电 / 倾角 | 昼夜节律 + 随机事件持续注入 |
+| 内感字段 | `battery_pct` `temperature` `charging` | `ambient_light` `ambient_db` `load` |
+| 网页 | `body.html` | `world.html` |
 
 **独立进程**的意义：将来接真实硬件时，直接停掉它即可，主程序无感知。
 
 ### 2.2 通道：复用既有四个传感器话题
 
 ```
-animat/env_simulator.py
+animat/simulators/env_simulator.py
         │
         ├─→ animat/sensor/vision         视觉（有人靠近/离开、光线变化）
         ├─→ animat/sensor/audio          听觉（环境异响）
         ├─→ animat/sensor/touch          触觉（被碰）
-        └─→ animat/sensor/interoception  内感（电量/体温/倾角）
+        └─→ animat/sensor/interoception  内感（仅环境量，身体量由 bot_simulator 负责）
 ```
 
 **完全复用，不新增通道**。`perception.py` 无需任何改动——
@@ -188,7 +188,7 @@ uv run animat
 
 # 终端 2：环境世界
 cd ~/Workspace/animat-agent
-uv run python -m animat.env_simulator
+uv run python -m animat.simulators.env_simulator
 ```
 
 启动后会看到：
@@ -196,9 +196,11 @@ uv run python -m animat.env_simulator
 ```
 🌍 环境世界启动 — 日常（室内）
    当前环境: 白天(光照0.57, 底噪46dB, 活跃0.83)
-   输入 /help 查看命令，/quiet 暂停事件
-env>
+   控制通道: animat/env/control  （手动注入请用 webui/world.html）
 ```
+
+> 本进程不提供终端命令行。手动注入事件请打开
+> `http://<本机IP>:8000/world.html`，或直接发布 MQTT 命令（见 4.3）。
 
 ### 4.2 环境变量
 
@@ -206,43 +208,51 @@ env>
 |---|---|---|
 | `ANIMAT_ENV_SCENE` | `normal` | 场景密度：`quiet` / `normal` / `lively` |
 | `ANIMAT_ENV_SEED` | 无 | 固定随机种子，便于复现 |
-| `ANIMAT_ENV_BATTERY` | `100` | 初始电量 |
-| `ANIMAT_ENV_EVENTS` | `1` | 设 `0` 关闭自动事件（只保留内感上报） |
+| `ANIMAT_ENV_EVENTS` | `1` | 设 `0` 关闭自动事件（只保留环境上报） |
 | `ANIMAT_ENV_LOGLEVEL` | `INFO` | 日志级别 |
+
+> 电量相关的 `ANIMAT_ENV_BATTERY` 已移除——电量归 `bot_simulator` 管。
 
 示例：
 
 ```bash
 # 热闹场景 + 可复现
-ANIMAT_ENV_SCENE=lively ANIMAT_ENV_SEED=42 uv run python -m animat.env_simulator
+ANIMAT_ENV_SCENE=lively ANIMAT_ENV_SEED=42 \
+  uv run python -m animat.simulators.env_simulator
 ```
 
-### 4.3 交互命令
+### 4.3 MQTT 命令
 
-| 命令 | 作用 |
-|---|---|
-| `/person` | 有人经过（靠近 0.8–3m 并看向你） |
-| `/leave` | 人离开 |
-| `/touch` | 被轻轻碰一下 |
-| `/light` | 光线突变 |
-| `/noise` | 环境异响 |
-| `/bump` | 身体被碰，倾角晃动后回正 |
-| `/status` | 查看当前环境与内感状态 |
-| `/scene quiet\|normal\|lively` | 切换场景密度 |
-| `/quiet` | 暂停自动事件（内感仍上报） |
-| `/lively` | 恢复自动事件 |
-| `/help` | 显示帮助 |
-| `/quit` | 退出 |
+发布到 `animat/env/control`：
 
-### 4.4 `/status` 示例
-
+```bash
+mosquitto_pub -h 127.0.0.1 -t animat/env/control -m '{"cmd":"person"}'
+mosquitto_pub -h 127.0.0.1 -t animat/env/control -m '{"cmd":"scene","arg":"lively"}'
 ```
-env> /status
-  场景    : 日常（室内）
-  事件开关: 开
-  环境    : 傍晚(光照0.15, 底噪41dB, 活跃0.60)
-  内感    : 电量88.5% 体温37.2°C 倾角0.0° 负载0.24
-  已发事件: 7 次，最近: 有人靠近 1.8m @ 21:09:39
+
+| cmd | arg | 作用 |
+|---|---|---|
+| `person` | — | 有人经过（靠近 0.8–3m 并看向你） |
+| `leave` | — | 人离开 |
+| `touch` | — | 被轻轻碰一下 |
+| `light` | — | 光线突变 |
+| `noise` | — | 环境异响 |
+| `bump` | — | 身体被碰，倾角晃动后回正 |
+| `status` | — | 查看当前环境状态 |
+| `scene` | quiet/normal/lively | 切换场景密度 |
+| `quiet` | — | 暂停自动事件（环境上报仍继续） |
+| `lively` | — | 恢复自动事件 |
+| `help` | — | 列出可用命令 |
+
+执行结果发布在 `animat/env/status`。
+
+### 4.4 状态示例
+
+```json
+{"type": "status", "scene": "normal", "scene_label": "日常（室内）",
+ "events_enabled": true, "phase": "傍晚", "ambient_light": 0.15,
+ "ambient_db": 41.0, "activity": 0.6, "imu_tilt_deg": 0.0,
+ "load": 0.24, "event_count": 7, "last_event": "有人靠近 1.8m @ 21:09:39"}
 ```
 
 ---
@@ -270,7 +280,7 @@ env> /status
 
 | 决策 | 备选方案 | 为什么这样选 |
 |---|---|---|
-| 独立进程 | 集成进 `simulator.py` | 环境与世界是不同概念；接真实硬件时可直接停用 |
+| 独立进程 | 集成进 `bot_simulator.py` | 环境与世界是不同概念；接真实硬件时可直接停用 |
 | 复用既有话题 | 新增 `animat/env/event` | 不引入第二套通路，真实硬件也能用同一套接口 |
 | 携带 `event_text` | 只发原始数值 | 数值需要模型猜测，猜测是幻觉的来源 |
 | 认知负载驱动内感 | 纯随机波动 | 随机波动会让模型为噪声编造解释 |
@@ -297,7 +307,7 @@ env> /status
 
 **只有两者配合，才能真正打断固着。**
 若观察到饱和检测频繁触发但话题仍不转移，说明事件密度不足，
-应调高 `ANIMAT_ENV_SCENE` 或手动 `/person` `/noise` 注入。
+应调高 `ANIMAT_ENV_SCENE`，或在 `world.html` 里手动注入 `person` / `noise`。
 
 ---
 

@@ -173,39 +173,28 @@ uv run animat
 uv run python -m animat
 ```
 
-### 传感器模拟器
+### 模拟器
 
-无实体硬件时，可使用内置模拟器进行开发测试（需先启动 EMQX + Redis）：
+无实体硬件时，用两个模拟器分别扮演"身体"和"世界"：
+
+| 模块 | 扮演 | 发布内容 | 控制台 |
+|---|---|---|---|
+| `animat/simulators/bot_simulator.py` | 机器人的**身体** | 电量、体温、充电、倾角 | `webui/body.html` |
+| `animat/simulators/env_simulator.py` | 机器人所处的**世界** | 昼夜、光照、底噪、路人 | `webui/world.html` |
+
+两者写入的内感字段互不重叠，所以屏幕上的每个读数都能确定来自哪一方。
 
 ```bash
-# 交互式模拟器
-uv run python -m animat.simulator
-
-# 后台自动刺激模式 (随机触觉/视觉, 用于观察自主反应)
-ANIMAT_SIM_AUTO_STIM=1 uv run python -m animat.simulator
+uv run python -m animat.simulators.bot_simulator
+uv run python -m animat.simulators.env_simulator
 ```
 
-模拟器会向 MQTT 发布模拟传感器数据（电量衰减、随机触碰、人体检测等），并提供交互式输入窗口与 Animat 对话。自由文本作为人类语音（`animat/external/speech`）输入；下列斜杠命令注入特定刺激：
+两者都没有终端界面，一律通过 MQTT 由各自的网页控制台操作
+（`animat/body/control`、`animat/env/control`）。
+详见 `docs/simulator_manual.md` 与 `docs/environment_simulator_cn.md`。
 
-```
-刺激命令 (发布给主 Animat):
-  /touch     — 轻抚 (低压+电容) → CARE/安抚
-  /hit       — 撞击 (压力骤升) → 疼痛 → 退缩反射 (绕过 LLM)
-  /approach  — 有人靠近 (1.5m) → 归属偏移
-  /leave     — 人离开 (10m) → 孤独/分离
-  /noise     — 巨响 (dB>85) → 惊吓 → 闪避反射
-  /battery N — 设置电量 N% (如 /battery 15) → 生存危机
-  /temp N    — 设置体温 N°C (如 /temp 43) → 过热焦虑
-
-模拟器控制命令:
-  /charge  — 开始充电
-  /stop    — 停止充电
-  /reset   — 电量重置为 100%
-  /status  — 显示当前状态
-  /help    — 列出命令
-```
-
-浏览器版控制面板在 `webui/` 目录，用 `python scripts/serve_webui.py` 起本地服务后访问 `http://localhost:8000/`（连接 `ws://<host>:8083/mqtt`，详见 `docs/simulator_manual.md`）。
+浏览器控制台在 `webui/` 目录，用 `python scripts/serve_webui.py` 起本地服务后访问
+`http://localhost:8000/`（连接 `ws://<host>:8083/mqtt`）。
 
 ## 项目结构
 
@@ -232,9 +221,13 @@ animat-agent/
 │   │   ├── effector.py    #   执行器工具 (全部发布到 animat/effector/*)
 │   │   └── knowledge.py   #   web_search (DeepSeek 搜索 API)
 │   ├── main.py            # 启动入口
-│   └── simulator.py       # MQTT 传感器模拟器 (交互式)
-├── webui/                 # 浏览器控制台 (3D 世界视口 + 对话)
-│   ├── index.html         #   主页面 (原 animat/simulator_web.html)
+│   └── simulators/        # 硬件替身 (不属于智能体本身)
+│       ├── bot_simulator.py   #   身体：电量、体温、充电
+│       └── env_simulator.py   #   世界：昼夜、环境事件
+├── webui/                 # 浏览器控制台
+│   ├── index.html         #   监控台：3D 世界视口、意识流、对话 (只读)
+│   ├── world.html         #   世界控制台：手动注入环境事件
+│   ├── body.html          #   身体控制台：电量、体温、充电
 │   └── vendor/            #   three.min.js / mqtt.min.js (内置，可离线)
 ├── scripts/               # demo 与工具脚本 (含 serve_webui.py, start_server.sh)
 ├── tests/                 # 单元测试 (conftest.py, test_homeostasis.py)

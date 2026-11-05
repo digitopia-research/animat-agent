@@ -1,9 +1,9 @@
 """
 Animat 环境世界模拟器 — 持续向 Animat 注入有语义的外界刺激。
 
-与 simulator.py 的分工:
-  simulator.py      调试工具：手动刺激（/touch /hit）、电量控制、动作回显
-  env_simulator.py  世界本身：昼夜节律 + 随机事件，让 Animat"活在有变化的世界里"
+与 bot_simulator 的分工:
+  bot_simulator  身体：电量、体温、充电、倾角（body.html 控制）
+  env_simulator  世界：昼夜节律 + 随机事件，让 Animat"活在有变化的世界里"
 
 为什么需要它:
   只有单一输入、且外部事件停止时，意识流会固着在同一件事上
@@ -17,8 +17,8 @@ Animat 环境世界模拟器 — 持续向 Animat 注入有语义的外界刺激
   - 随机噪声会诱发幻觉（曾把 37°C 编成"系统过热"），故只发有语义的事件
 
 用法:
-  uv run python -m animat.env_simulator
-  ANIMAT_ENV_SEED=42 uv run python -m animat.env_simulator   # 固定随机种子（可复现）
+  uv run python -m animat.simulators.env_simulator
+  ANIMAT_ENV_SEED=42 uv run python -m animat.simulators.env_simulator   # 固定种子（可复现）
 
 控制方式（仅 MQTT，无终端交互）:
   本进程是后端服务，不读 stdin、不提供命令行。
@@ -159,7 +159,7 @@ class EnvironmentSimulator:
         self._client: Optional[aiomqtt.Client] = None
 
         # 内感状态：只保留本模块拥有的部分。
-        # 电量/体温/充电判定全部交给 simulator.py（body.html），
+        # 电量/体温/充电判定全部交给 bot_simulator（body.html），
         # 这里再存一份只会产生两个互相矛盾的"真相"。
         self._tilt = 0.0
         self._load = 0.0          # 认知负载，反映在放电叙事的强度上
@@ -258,7 +258,7 @@ class EnvironmentSimulator:
             topic=Topic.SENSOR_INTERO,
             payload={
                 # 只发倾角（这是"世界碰了身体"造成的物理扰动），
-                # 不带 battery/temperature —— 那两个字段归 simulator.py。
+                # 不带 battery/temperature —— 那两个字段归 bot_simulator。
                 "imu_tilt_deg": round(self._rng.choice([-1, 1]) * self._rng.uniform(2.0, 4.0), 1),
                 "event": "gentle_bump",
                 "event_text": "身体被轻碰了一下，晃了晃",
@@ -324,7 +324,7 @@ class EnvironmentSimulator:
     async def _interoception_loop(self) -> None:
         """环境侧的内感补充：只发环境量，不发身体数值。
 
-        电量与体温的唯一权威来源是 simulator.py（body.html 控制的那个）。
+        电量与体温的唯一权威来源是 bot_simulator（body.html 控制的那个）。
         早先这里也算电量，结果两个进程每 2 秒各写一次
         animat/sensor/interoception，数值在两种模型之间来回跳，
         在网页上完全无法判断某次掉电是认知负载算的还是人为设的。
@@ -383,7 +383,7 @@ class EnvironmentSimulator:
                 elif cmd == "move":
                     self._load = min(1.0, self._load + 0.5)
                 # 不再因为"去找充电器"就自行改充电状态：
-                # 充电由 simulator.py 根据同一条 motor 指令处理，
+                # 充电由 bot_simulator 根据同一条 motor 指令处理，
                 # 这里插一脚会让两边状态不一致。
             elif topic == Topic.CORTEX_THOUGHT:
                 # 每产生一次思维就计入负载
@@ -463,7 +463,7 @@ class EnvironmentSimulator:
             "ambient_light": self._circadian.ambient_light,
             "ambient_db": self._circadian.ambient_db,
             "activity": self._circadian.activity,
-            # 电量/体温/充电不在这里报：它们归 body_simulator 管，
+            # 电量/体温/充电不在这里报：它们归 bot_simulator 管，
             # 本页只提供环境量与认知负载。
             "imu_tilt_deg": round(self._tilt, 1),
             "load": round(self._load, 2),

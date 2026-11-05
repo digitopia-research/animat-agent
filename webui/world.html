@@ -16,7 +16,7 @@
   通信：
     发布 animat/env/control  {"cmd":"person"} 之类
     订阅 animat/env/status   状态快照与命令回执
-    env_simulator 在后端模式下（stdin 接 /dev/null）靠这条通道接受控制。
+    env_simulator 作为后端服务靠这条通道接受控制（它不读 stdin）。
 -->
 <script src="vendor/mqtt.min.js"></script>
 <style>
@@ -417,7 +417,7 @@ const TOPIC = {
 };
 
 // ───────── 可选事件 ─────────
-// 每一项对应 env_simulator 里 __doc__ 列出的一个交互命令。
+// 每一项对应 env_simulator 支持的一个控制命令。
 // 这张表只是"按钮清单"，真正的行为由后端命令决定，前端不解释任何语义。
 const EVENTS = [
   { cmd: "person", name: "有人经过", icon: "◉", cls: "vision",
@@ -554,7 +554,7 @@ $("toggleEvents").onclick = function () {
 };
 
 // ───────── 连接 Animat ─────────
-// env_simulator 本身不具备"停/停连 Animat"的命令，这里没有对应的远端能力，
+// env_simulator 本身不具备"断开/重连 Animat"的命令，这里没有对应的远端能力，
 // 因此按钮明确置灰并说明原因，而不是做一个点了没反应的假开关。
 $("toggleBridge").disabled = true;
 $("toggleBridge").textContent = "常开";

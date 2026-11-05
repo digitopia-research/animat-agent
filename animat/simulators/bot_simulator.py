@@ -1,12 +1,12 @@
 """
-Animat Agent 身体模拟器
+Bot 模拟器 —— Animat 的身体
 
 用于无实体硬件时，模拟这台机器人自身的生理状态：电量、体温、充电。
-不模拟外部世界——昼夜、光照、路人、触碰、噪声一律由 env_simulator.py 负责。
+不模拟外部世界——昼夜、光照、路人、触碰、噪声一律由 env_simulator 负责。
 
 职责边界（重要）:
-  simulator.py    身体  → 电量 / 体温 / 充电 / 倾角，写 animat/sensor/interoception
-  env_simulator   世界  → 昼夜节律 / 光照 / 路人 / 轻微触碰，写其余 sensor 话题
+  bot_simulator  身体  → 电量 / 体温 / 充电 / 倾角，写 animat/sensor/interoception
+  env_simulator  世界  → 昼夜节律 / 光照 / 路人 / 轻微触碰，写其余 sensor 话题
 
 两者都会写 SENSOR_INTERO，所以设计上分工明确：
   - 本模块是电量与体温的唯一权威来源
@@ -31,7 +31,7 @@ Animat Agent 身体模拟器
   ANIMAT_SIM_DISCHARGE=0.05  放电速率(%/周期)
 
 用法:
-  uv run python -m animat.simulator
+  uv run python -m animat.simulators.bot_simulator
 """
 
 import os
@@ -46,7 +46,7 @@ import aiomqtt
 
 from animat.config import Topic, HomeostasisConfig
 
-logger = logging.getLogger("animat.simulator")
+logger = logging.getLogger("animat.bot_simulator")
 
 
 class BodySimulator:
