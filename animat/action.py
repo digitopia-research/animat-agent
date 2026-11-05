@@ -68,6 +68,17 @@ INTENT_ACTION_TREES: dict[str, list[ActionNode]] = {
         ActionNode(command=MotorCommand.LED, params={"color": "blue", "pattern": "pulse"}, delay_ms=0),
         ActionNode(command=MotorCommand.MOVE, params={"direction": "people", "speed": 0.3}),
     ],
+    # 探索/走动。这个 key 必须存在：模型输出的 <intent>move</intent>
+    # 就是查这张表，查不到会 fallback 到 idle（什么都不做），
+    # 表现为"心里想四处看看，身体一动不动"。
+    #
+    # 步速取 0.4 而不是 1.0：这是漫游不是逃跑，太快会让画面像在抽搐。
+    # 先给一个轻微的表情和灯光，让动作看上去有起因，而不是突然平移。
+    "move": [
+        ActionNode(command=MotorCommand.EXPRESSION, params={"face": "curious"}, delay_ms=0),
+        ActionNode(command=MotorCommand.LED, params={"color": "cyan", "pattern": "gentle_pulse"}, delay_ms=0),
+        ActionNode(command=MotorCommand.MOVE, params={"direction": "forward", "speed": 0.4}, delay_ms=150),
+    ],
     "express_need": [
         ActionNode(command=MotorCommand.EXPRESSION, params={"face": "hopeful"}, delay_ms=0),
         ActionNode(command=MotorCommand.LED, params={"color": "warm_white", "pattern": "gentle_pulse"}, delay_ms=0),

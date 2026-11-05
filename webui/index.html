@@ -209,7 +209,11 @@
   .layout {
     display: grid;
     grid-template-columns: 330px 1fr;
-    flex: 1 1 auto;
+    /* 布局高度只取剩余空间：flex: 1 1 0 的 basis=0 已经保证
+       "理想高度与内容无关"，不要再写 height: 0 —— 那会让 grid 的
+       行高参照塌成 0，右侧 .main 连同里面的面板一起消失。 */
+    grid-template-rows: minmax(0, 1fr);
+    flex: 1 1 0;
     min-height: 0;
     transition: grid-template-columns .26s cubic-bezier(.4, 0, .2, 1);
   }
@@ -224,6 +228,8 @@
     overflow-y: auto;
     overflow-x: hidden;
     transition: padding .26s ease;
+    /* 作为 grid 子项，默认 min-height:auto 会被侧栏内容（稳态条/事件流）撑破行高 */
+    min-height: 0;
   }
 
   /* 收起后：内容隐藏，只留一条竖排按钮 */
@@ -254,7 +260,16 @@
   }
   .side-expand:hover { color: var(--accent); background: var(--accent-soft); }
   .layout.side-collapsed .side-expand { display: block; }
-  .main { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
+  /* flex: 1 1 0 —— 主区高度严格等于视口剩余量，不受子内容高度影响，
+     避免"内容变多→主区变高→挤压 3D 视口"的循环。
+     注意不要加 height: 0：它会让 .viewport 的 34vh 失去参照，
+     整个主区塌成一条线，3D/对话/意识流三块全都看不见。 */
+  .main {
+    display: flex; flex-direction: column;
+    min-width: 0; min-height: 0;
+    flex: 1 1 0;
+    overflow: hidden;
+  }
   .panes {
     display: grid;
     grid-template-columns: 1fr 1fr;
@@ -262,7 +277,12 @@
        于是 .thoughts 的 overflow-y 失效，消息一多就把面板顶破。
        minmax(0, 1fr) 同时允许行缩小到 0，双重保险。 */
     grid-template-rows: minmax(0, 1fr);
-    flex: 1 1 auto;
+    /* flex-basis 必须是 0 而不是 auto：
+       basis:auto 时这一块的"理想高度"= 内容高度（意识流里有多少条消息），
+       而可用空间又全部来自视口剩余量，于是每加一条消息，
+       布局就按内容重新分配一次，把上面的 3D 视口往上挤一点。
+       basis:0 + grow:1 表示高度完全由剩余空间决定，与内容无关。 */
+    flex: 1 1 0;
     min-height: 0;
     overflow: hidden;
   }
@@ -443,7 +463,8 @@
 
   /* ── 意识流 ── */
   .thoughts {
-    flex: 1 1 auto;
+    /* basis:0：高度只取 .pane 的剩余空间，绝不参与"按内容计算尺寸" */
+    flex: 1 1 0;
     /* flex 子项默认 min-height:auto 会被内容撑高，必须显式归零 */
     min-height: 0;
     overflow-y: auto;
@@ -452,6 +473,9 @@
     display: flex; flex-direction: column; gap: 7px;
   }
   .thought {
+    /* 作为纵向 flex 容器的子项，默认 flex-shrink 会让条目被压扁/互相重叠，
+       这里禁止收缩，超出部分交给 .thoughts 的滚动 */
+    flex: 0 0 auto;
     font-size: 11.5px; line-height: 1.68; padding: 9px 12px; border-radius: var(--radius-sm);
     background: var(--bg-card); border: 1px solid var(--line);
     color: var(--txt-dim); white-space: pre-wrap; word-break: break-word;
@@ -483,14 +507,14 @@
 
   /* ── 聊天 ── */
   .chat {
-    flex: 1 1 auto; min-height: 0;
+    flex: 1 1 0; min-height: 0;
     overflow-y: auto; overflow-x: hidden;
     padding: 18px 20px;
     display: flex; flex-direction: column; gap: 11px;
   }
   /* 思考条目与消息本身不允许撑破父容器 */
   .thought, .msg { max-width: 100%; }
-  .msg { max-width: 84%; display: flex; flex-direction: column; gap: 4px; animation: fadeSlide .28s ease-out; }
+  .msg { flex: 0 0 auto; max-width: 84%; display: flex; flex-direction: column; gap: 4px; animation: fadeSlide .28s ease-out; }
   .msg .who { font-size: 8.5px; color: var(--muted); letter-spacing: 1.4px; text-transform: uppercase; }
   .msg .bubble {
     padding: 9px 13px; border-radius: var(--radius-sm); font-size: 12.5px; line-height: 1.62;
@@ -540,6 +564,8 @@
   .events-head:hover { color: var(--txt-dim); background: rgba(255,255,255,.02); }
   .events-head .toggle { font-size: 8.5px; color: var(--muted); letter-spacing: 1px; }
   .events {
+    /* flex-shrink 必须为 0：这里 basis 是 auto，一旦允许收缩，
+       它和 .panes 会互相挤压，行数多了就把上面的面板顶出去 */
     flex: 0 0 auto; max-height: 178px; overflow-y: auto; padding: 9px 18px;
     font-family: var(--mono); font-size: 10px; line-height: 1.65;
     background: var(--bg-inset);
@@ -569,7 +595,15 @@
   .events .warn .msgbody { color: var(--red); }
 
   /* ── 3D 世界视口 ── */
-  .viewport-wrap { display: flex; flex-direction: column; min-height: 0; border-bottom: 1px solid var(--line); }
+  /* 必须显式给 flex: 0 0 auto
+     视口本身固定 34vh，但它的位置在 .panes 之上；如果这里任由 flex 收缩
+     （默认 flex-shrink:1 且 basis 为内容尺寸），下方意识流内容一多，
+     整个视口会被压扁甚至负向溢出，压在 3D 画面上。 */
+  .viewport-wrap {
+    display: flex; flex-direction: column;
+    flex: 0 0 auto; min-height: 0;
+    border-bottom: 1px solid var(--line);
+  }
   .viewport-head {
     padding: 8px 18px; font-size: 9px; text-transform: uppercase; letter-spacing: 2px;
     color: var(--txt-dim); font-weight: 700; display: flex; align-items: center;
@@ -592,7 +626,8 @@
     color: var(--accent) !important;
     font-weight: 700;
   }
-  .viewport { position: relative; flex: 1 1 auto; min-height: 220px; height: 34vh; overflow: hidden;
+  /* 高度固定 34vh 并禁止收缩：视口是"观察窗"，不应被下方面板内容挤压 */
+  .viewport { position: relative; flex: 0 0 auto; height: 34vh; min-height: 220px; overflow: hidden;
     background: #05070b; }
   .viewport canvas { display: block; width: 100%; height: 100%; }
   /* 视口内的环境光晕叠加，跟随昼夜变化 */

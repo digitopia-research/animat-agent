@@ -164,10 +164,21 @@ class HomeostasisEngine:
         - 探索度随时间降低 (无新刺激)
         - 生存度随时间降低 (电量消耗)
         """
+        # 衰减速率必须与世界能提供的事件密度匹配，否则需求永远补不上。
+        #
+        # 原先 AFFILIATION 是 0.005（0.5 点/秒），而 env_simulator 在 normal
+        # 场景下 3-5 分钟才产生一次人物事件，单次 approach 只补
+        # intensity(0.28)*4 ≈ 1.1 点——2.2 秒就被吃光，下一个事件要等几分钟。
+        # 结果是只要没人手动注入，归属度必然长期锁在 0、PANIC 常驻，
+        # 模型反复说"想做点什么"却始终不满足。这不是系数调小了，
+        # 是需求衰减比事件供给快了三个数量级。
+        #
+        # 现在的量级：满值到零约 20-30 分钟，与世界事件的分钟级节奏相当，
+        # 也符合直觉——真人独处十几分钟不会"孤独值归零"。
         decay_rate = {
-            Vital.VIABILITY:   0.0 * dt_seconds,    # 生存度由外部传感器(battery)直通驱动，不自主衰减
-            Vital.AFFILIATION: 0.005 * dt_seconds,   # 社交需求增长较快
-            Vital.EXPLORATION: 0.008 * dt_seconds,   # 好奇心衰减最快
+            Vital.VIABILITY:   0.0 * dt_seconds,      # 生存度由外部传感器(battery)直通驱动，不自主衰减
+            Vital.AFFILIATION: 0.0008 * dt_seconds,   # 约 21 分钟从满到零
+            Vital.EXPLORATION: 0.0015 * dt_seconds,   # 约 11 分钟从满到零（好奇比社交消解得快）
         }
         for vital, rate in decay_rate.items():
             new_val = self._vitals[vital] - rate * 100
@@ -180,7 +191,18 @@ class HomeostasisEngine:
         for vital, current in self._vitals.items():
             cfg = VITAL_CONFIGS[vital]
             ideal = cfg["ideal"]
-            deviation = abs(current - ideal) / ideal
+
+            # 偏低的差额就是需求缺口，偏高则不构成需求。
+            #
+            # 原来用 abs(current - ideal) 把"超过理想值"也算成偏差，
+            # 于是探索度被 move 灌到 98（理想 60）时 deviation = 0.63，
+            # 照样触发 PLAY「无聊，想找点有趣的事」——
+            # 一件刚做够的事被判定为"还想做"，模型因此反复去探索，
+            # 越探索越"无聊"，形成正反馈。
+            #
+            # 需求只有在不足时才成立：好奇满足了就该安静下来，
+            # 而不是因为"满足过头"再被催一次。
+            deviation = max(0.0, ideal - current) / ideal
             is_danger = current < cfg["danger"]
             drives.append(Drive(
                 vital=vital,
@@ -453,6 +475,21 @@ class HomeostasisEngine:
         if feeling_type == FeelingType.CARESS.value:
             # 抚摸恢复归属度
             await self.update_vital(Vital.AFFILIATION, self._vitals[Vital.AFFILIATION] + intensity * 10)
+        elif feeling_type == FeelingType.APPROACH.value:
+            # 有人靠近 = 被陪伴。
+
+            # 早先只有 CARESS 能恢复归属度，意味着"有人在旁边"这个事实
+            # 完全不被承认：注入 person 事件后感知层确实产生了 approach 和
+            # gaze，但 affiliation 一动不动，PANIC 长期锁在 1.0。
+            # 现实里人感到孤独时，需要的往往只是"有人在"，
+            # 而不是被触摸。系数取 4：明显低于抚摸(10)，
+            # 所以有人陪着是缓解，被真正触碰才是满足。
+            await self.update_vital(Vital.AFFILIATION, self._vitals[Vital.AFFILIATION] + intensity * 4)
+        elif feeling_type == FeelingType.GAZE.value:
+            # 被注视比单纯"在旁边"更进一步：对方把注意力放在你身上。
+            # 系数略低于 approach 的单次强度，但 gaze 通常持续数秒、
+            # 会连续触发，累计效果更强——这正是"被看见"的感觉。
+            await self.update_vital(Vital.AFFILIATION, self._vitals[Vital.AFFILIATION] + intensity * 3)
         elif feeling_type == FeelingType.ABANDON.value:
             # 遗弃感加速归属度衰减
             await self.update_vital(Vital.AFFILIATION, self._vitals[Vital.AFFILIATION] - intensity * 5)
@@ -466,6 +503,19 @@ class HomeostasisEngine:
             # 充电恢复生存度，同时小幅恢复完好度（身体的"修复"感）
             await self.update_vital(Vital.VIABILITY, self._vitals[Vital.VIABILITY] + intensity * 20)
             await self.update_vital(Vital.INTEGRITY, self._vitals[Vital.INTEGRITY] + intensity * 3)
+        elif feeling_type == FeelingType.SATISFACTION.value:
+            # 好奇被满足。这是 exploration 唯一的补充来源：
+            # 它没有传感器可以直接驱动，只能由"主体真的去探索了"来兑现。
+            # 不绑定真实行为的话，驱力就会变成永远无法消解的噪音。
+            #
+            # 系数 30：一次移动 (intensity 0.6) 补 18 点，从理想值的 60
+            # 往上补的话很快就饱和；取 60 会一次灌到 100，反而让探索行为
+            # 变成无脑刷分。宁可每次补得温和些，靠"真的出去了"累积，
+            # 也不要一次满足到顶。
+            await self.update_vital(
+                Vital.EXPLORATION,
+                self._vitals[Vital.EXPLORATION] + intensity * 30,
+            )
         elif feeling_type == FeelingType.SOOTHING.value:
             # 安抚: 小幅恢复归属度和完好度
             await self.update_vital(Vital.AFFILIATION, self._vitals[Vital.AFFILIATION] + intensity * 5)

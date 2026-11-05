@@ -22,7 +22,7 @@ from typing import Optional
 from animat.config import Topic
 from animat.nervous import NervousSystem
 from animat.memory import MemoryStore
-from animat.llm_backend import LocalLLM, LLMConfig
+from animat.llm_backend import LocalLLM, LLMConfig, _extract_tool_calls
 from animat.thought import (
     Thought,
     ActionGate,
@@ -58,12 +58,17 @@ CONSCIOUSNESS_SYSTEM_PROMPT = """\
 
 输出格式（严格两行）:
 第一行写意图标签，从下面五个里选一个：
-  <intent>none</intent>       只想一想，不想有任何外部行为（大多数情况）
+  <intent>none</intent>       只在脑子里想想，不产生任何外部行为
   <intent>soliloquy</intent>  自言自语，只是自己念叨吐槽，并不指望有人听见
   <intent>call</intent>       想对周围发出呼唤，希望有人回应（喊人、求助、呼救、打招呼）
-  <intent>move</intent>       想移动身体
-  <intent>expression</intent> 想做个表情
+  <intent>move</intent>       想改变位置：四处逛逛、走近看看、换个地方待着、好奇地凑过去
+  <intent>expression</intent> 只想用表情或灯光表达情绪，身体不移动
 第二行写想法本身（1-3句话）。
+
+关于 move 与 expression 的区分：
+想"做点什么""找点事做""四处看看"这类念头，如果它意味着你的位置要变，
+就选 move；只有身体不动、仅靠表情或灯光传达情绪时才是 expression。
+不要因为拿不准就一律选 expression——那会让你一直待在原地。
 
 注意 speak 与 call 的区别：内心吐槽、感叹、自问自答都算 soliloquy；
 只有当你希望"外面有人能听到并回应"时才是 call。
@@ -94,11 +99,11 @@ DIALOGUE_SYSTEM_PROMPT = """\
    文字只用来告诉对方结果，不要用它代替动作。
    如果你已经决定要做，就调用工具；如果不打算做，就不要说你要做。
 
-输出格式（严格两部分）:
-第一行写这一轮的状态标记，二选一：
-  <did>action</did>   你确实调用了工具，或这轮不需要任何动作
-  <did>claim</did>    你嘴上说了要做一个动作，但本轮没有调用工具
-第二行开始写你对对方说的话（1-3 句口语）。
+要调用工具时，直接输出工具调用（系统会执行它，你不需要再用文字复述）:
+<tool_call>
+{{"name": "工具名", "arguments": {{"参数": "值"}}}}
+</tool_call>
+调用完成后，再说你对对方说的话（1-3 句口语）。
 
 当前状态:
 {body_context}
@@ -139,24 +144,12 @@ def _parse_intent(text: str, default: str = "none") -> tuple[str, str]:
     return intent, body.strip()
 
 
-# 模型按 prompt 要求输出 <did>action</did> 或 <did>claim</did>，自评这一轮
-# 是否"只说不做"。由模型判断而不是代码猜关键词：声称动作的说法千变万化，
-# 任何词表都会漏，且换语言直接失效。
-_DID_RE = re.compile(r"<\s*did\s*>\s*(action|claim)\s*<\s*/\s*did\s*>", re.IGNORECASE)
-
-
-def _parse_did_marker(text: str) -> tuple[bool, str]:
-    """解析 <did> 标记。
-
-    返回 (模型是否自认"只说不做", 去掉标记后的正文)。
-    标记缺失时返回 (False, 原文)——没有标记就不补救，避免误伤。
-    """
-    if not text:
-        return False, text
-    m = _DID_RE.search(text)
-    claims_only = bool(m) and m.group(1).lower() == "claim"
-    body = _DID_RE.sub("", text).strip()
-    return claims_only, body
+# 历史上这里有一对 <did>action</did> / <did>claim</did> 自评标记，
+# 用来让模型交代"这轮是真做了还是只说了"。移除的原因：
+# 模型把它理解成一个动作槽而不是自评，写成 <did>web_search</did>、
+# <did>gesture</did>——工具没被调用，标签本身却被当成台词说了出去。
+# 当时的动机是"只说不做"难以用词表判断，但真正的解法是让工具调用
+# 可执行、可回注（现已修好），而不是在输出里再套一层自评。
 
 
 def _sanitize_output(text: str) -> str:
@@ -164,11 +157,10 @@ def _sanitize_output(text: str) -> str:
 
     1. 去掉 "[T+630.3s] 内部想法:" 这类调试前缀（模型从传感器上下文模仿而来）
     2. 去掉 *轻轻转动头部* 这类肢体动作描写
-    3. 去掉残留的 <intent> / <did> 标签
+    3. 去掉残留的 <intent> 标签
     """
     if not text:
         return ""
-    text = _DID_RE.sub("", text)
     text = _INTENT_RE.sub("", text)
     text = _DEBUG_PREFIX_RE.sub("", text)
     text = _ACTION_DESC_RE.sub("", text)
@@ -202,6 +194,12 @@ class StreamCortex:
     THINK_INTERVAL_SEC = 5.0        # 思维间隔(秒)
     THINK_INTERVAL_IDLE = 8.0       # 安静时的思维间隔
     THINK_INTERVAL_DRIVEN = 4.0     # 高驱力时思维加速
+
+    # 对话历史在"自发思维"里的保鲜期(秒)。
+    # 超过这个时长，用户说过的话就不再进入自发思维的上下文——
+    # 那些话已经被回答过了，继续带着只会变成一份永远做不完的待办。
+    # 取 3 分钟：足够让刚聊完的话题延续一阵，又不至于把意识流占满。
+    CONV_CONTEXT_TTL_SEC = 180.0
     # 自发思维的最大 token 数。
     # 独白本来就短（实测 50-150 token 就收尾），原来统一给 768 是浪费：
     # 14B 在 5060 Ti 上约 28 tok/s，多给的预算直接体现为等待时间。
@@ -658,11 +656,24 @@ class StreamCortex:
             # 最近对话历史：只取"对方说过的话"，不喂自己的回复。
             # 否则模型会把自己上一轮的输出当作待接续的话题，形成
             # "自己问、自己答"的发散循环（实测一句话连出十余条回复）。
-            recent_conv = (
-                [m for m in self._conversation_history if m.get("role") == "user"][-3:]
-                if self._conversation_history
-                else None
-            ) or None
+            #
+            # 还要加保鲜期：用户的一句吩咐（"帮我查上海天气并亮灯"）
+            # 如果一直留在上下文里，自发思维会把它当成未完成的待办，
+            # 反复计划却永远做不完——它既没有"回复用户"这个出口，
+            # 也不肯放弃这件事。实测一句吩咐能循环八分钟，
+            # 把整个意识流占满。超过 CONV_CONTEXT_TTL_SEC 的话就当作
+            # 已经翻篇，让它回到自己的状态里。
+            recent_conv = None
+            if self._conversation_history:
+                now = time.time()
+                fresh = [
+                    m for m in self._conversation_history
+                    if m.get("role") == "user"
+                    # 老数据没有 ts 字段（历史持久化时还没有这个设计），
+                    # 当作过期处理，正好把升级前堆积的旧指令清出去。
+                    and (now - m.get("ts", 0.0)) <= self.CONV_CONTEXT_TTL_SEC
+                ][-3:]
+                recent_conv = fresh or None
 
             accumulated, collected_calls = await asyncio.to_thread(
                 self._consume_stream_think,
@@ -706,7 +717,7 @@ class StreamCortex:
                 return None
 
         if not accumulated.strip():
-            # 模型这轮什么都没说（常见于只输出了 <intent>/<did> 等控制标签，
+            # 模型这轮什么都没说（常见于只输出了 <intent> 等控制标签，
             # 剥离后为空）。此前这里静默 return None，调用方也只静默返回 5.0，
             # 结果是"明明每 5 秒都在推理，日志里却一条都没有"，从外部完全
             # 无法区分"安静"和"死了"。记一条 DEBUG 保证可观测，
@@ -748,7 +759,13 @@ class StreamCortex:
             body_context=self._body_context[:500]
         )
         # 1) 把外部输入记入对话历史（用于上下文连贯，避免"记不住名字"）
-        self._conversation_history.append({"role": "user", "content": external_text})
+        # 带时间戳：自发思维需要据此判断这条指令是不是"刚刚说的"。
+        # 没有时间戳的话，几十分钟前的一句吩咐会被当成未完成的待办，
+        # 一直挂在上下文里反复咀嚼（实测一句"帮我查上海天气并亮灯"
+        # 让它循环了 8 分钟，因为它既无法回应用户，也不肯放下这件事）。
+        self._conversation_history.append({
+            "role": "user", "content": external_text, "ts": time.time(),
+        })
         # 仅保留最近 N 轮
         if len(self._conversation_history) > self.MAX_CONVERSATION_MEMORY * 2:
             self._conversation_history = self._conversation_history[-self.MAX_CONVERSATION_MEMORY * 2:]
@@ -789,42 +806,34 @@ class StreamCortex:
             choice = response["choices"][0]
             tool_calls = choice["message"].get("tool_calls") or []
             text = (choice["message"].get("content") or "").strip()
+
+            # llama-cpp-python 不会把 Qwen3 的 <tool_call> 块解析成结构化的
+            # tool_calls，而是原样留在 content 里（实测该字段恒为 null）。
+            # 只读 tool_calls 的话，模型明明写了正确的调用也会被当成普通
+            # 文字说出口，从外面看就像它只是在念叨工具名。
+            # 这里回退到 content 解析，把标签里的调用取出来，正文只留剩余部分。
+            if not tool_calls and "<tool_call>" in text:
+                tool_calls, text = _extract_tool_calls(text)
+                tool_calls = tool_calls or []
+                if tool_calls:
+                    # _extract_tool_calls 返回的是扁平结构 {"name","arguments"}，
+                    # 与原生 tool_calls 的 {"function":{"name",...}} 不同。
+                    # 这里两种都兼容，否则日志会在解析成功的路径上抛 KeyError，
+                    # 把一次正常的工具调用变成"Error during think cycle"。
+                    def _cname(c):
+                        if isinstance(c, dict):
+                            fn = c.get("function")
+                            if isinstance(fn, dict):
+                                return fn.get("name")
+                            return c.get("name")
+                        return None
+                    logger.info(
+                        "从 content 中解析出 %d 个工具调用: %s",
+                        len(tool_calls), [_cname(c) for c in tool_calls],
+                    )
         except Exception as e:
             logger.error(f"Response think failed: {e}")
             return None
-
-        # 解析模型的自评标记：<did>claim</did> 表示它承认"嘴上说要动作，
-        # 但这一轮没调工具"。判断交给模型完成，代码不做关键词匹配。
-        claims_only, text = _parse_did_marker(text)
-
-        # 模型自认没做，且确实没有 tool_calls → 补一次强制调用
-        if claims_only and not tool_calls:
-            logger.info("模型自评'只说不做'，强制重试并要求调用工具")
-            messages.append({"role": "assistant", "content": text})
-            messages.append({
-                "role": "system",
-                "content": (
-                    "你标记了 <did>claim</did>，说明你只是说了要做，"
-                    "对方什么也不会看到。现在必须直接调用对应的工具完成这件事，"
-                    "不要再只用文字描述。"
-                ),
-            })
-            try:
-                forced = await self._llm_complete(
-                    label="did-retry",
-                    messages=messages,
-                    max_tokens=self.MAX_REPLY_TOKENS,
-                    tools=self._enabled_tools(),
-                )
-                fc = forced["choices"][0]
-                tool_calls = fc["message"].get("tool_calls") or []
-                if tool_calls:
-                    logger.info("强制重试成功，工具: %s",
-                                [c["function"]["name"] for c in tool_calls])
-                    # 采用重试拿到的正文（通常为空或一句确认）
-                    text = (fc["message"].get("content") or "").strip() or text
-            except Exception as e:
-                logger.warning("强制工具调用重试失败: %s", e)
 
         # 模型在对话里要求调用工具：先执行，再让它基于结果回答。
         # 注意这是一轮对话里的第二次 LLM 调用，耗时直接翻倍——
@@ -856,15 +865,16 @@ class StreamCortex:
                 tool_ms / 1000, time.time() - retry_t0,
             )
 
-        # 对话场景必然是对外说话；若模型自带意图/自评标签则剥离，
-        # 避免 <intent>/<did> 混进给用户看的正文（工具后续轮次也可能带出来）。
-        _, text = _parse_did_marker(text)
+        # 对话场景必然是对外说话；若模型自带意图标签则剥离，
+        # 避免 <intent> 混进给用户看的正文（工具后续轮次也可能带出来）。
         _, text = _parse_intent(text, default="call")
         if not text:
             return None
 
         # 记录 assistant 回复到历史
-        self._conversation_history.append({"role": "assistant", "content": text})
+        self._conversation_history.append({
+            "role": "assistant", "content": text, "ts": time.time(),
+        })
 
         # 持久化对话历史（与稳态指标一样重启后延续）
         await self._save_history()
@@ -1010,7 +1020,20 @@ class StreamCortex:
     async def _execute_tool_calls(self, calls: list[dict]) -> None:
         """执行模型请求的工具调用，结果记日志并回注下一轮上下文。"""
         for call in calls:
-            fn = (call or {}).get("function") or {}
+            # 两种结构都要认：
+            #   原生 OpenAI 格式  {"function": {"name":..., "arguments": "json串"}}
+            #   content 解析格式  {"name":..., "arguments": {...}}
+            # 后者来自 _extract_tool_calls——Qwen3 经由 llama-cpp-python 时
+            # tool_calls 字段恒为 null，调用总是走 content 解析这条路径。
+            # 只认前者的话，name 会是空串，工具被静默跳过，外部看就是
+            # "它说要查却什么也没查"。
+            call = call or {}
+            fn = call.get("function")
+            if not isinstance(fn, dict):
+                fn = {
+                    "name": call.get("name", ""),
+                    "arguments": call.get("arguments", "{}"),
+                }
             name = fn.get("name", "")
             raw_args = fn.get("arguments") or "{}"
             try:
@@ -1089,6 +1112,25 @@ class StreamCortex:
             logger.warning("StreamCortex emit failed (MQTT unavailable?): %s", decision.action_type)
             return
         logger.info(f"StreamCortex emit: {decision.action_type} | {thought.text[:60]}")
+
+        # 真动了，就说明好奇心得到了满足。
+        # exploration 此前只有衰减、没有任何补充路径：一旦归零便永久锁死，
+        # PLAY（无聊）情绪常驻、驱力一直拉满，模型只能反复念叨
+        # "该找点有趣的事做"却永远得不到缓解。
+        #
+        # 满足必须绑定"真的移动了"，而不是"想了想要动"——否则纯靠念头就能
+        # 回血，驱力永远不会被真正消解，行为反而更退化成空想。
+        # 这里走感受通道交给稳态模块处理，不直接改内部状态，
+        # 保持 StreamCortex 与 Homeostasis 之间只通过 MQTT 解耦的现状。
+        if decision.action_type == "move":
+            try:
+                await self.nervous.fire(Topic.FEELING, {
+                    "type": "satisfaction",
+                    "intensity": 0.6,
+                    "source": "exploration",
+                })
+            except Exception as e:
+                logger.debug("exploration satisfaction emit failed: %s", e)
 
     async def _broadcast_thought(self, thought: Thought, activated: bool):
         """把每一次内部思维广播到 animat/cortex/thought（内心独白流）。

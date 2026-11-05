@@ -158,6 +158,12 @@ class EnvironmentSimulator:
         self._running = False
         self._client: Optional[aiomqtt.Client] = None
 
+        # 是否有人在场，以及在场截止时刻与当时的距离。
+        # person_approach 会打开这个状态，person_leave 或到期后关闭。
+        self._person_until: float = 0.0
+        self._person_distance: float = 1.5
+        self._person_gaze: float = 1.0
+
         # 内感状态：只保留本模块拥有的部分。
         # 电量/体温/充电判定全部交给 bot_simulator（body.html），
         # 这里再存一份只会产生两个互相矛盾的"真相"。
@@ -310,6 +316,17 @@ class EnvironmentSimulator:
         self._last_event = f"{event.description} @ {datetime.now():%H:%M:%S}"
         logger.info("🌍 事件: %s -> %s", event.description, event.topic)
 
+        # 人在场状态：靠近则开启、离开则关闭。持续期间由
+        # _keep_person_present 每 2 秒补一帧，让"有人陪着"成为状态而非瞬间。
+        if event.name == "person_approach":
+            self._person_distance = event.payload.get("distance_m", 1.5)
+            self._person_gaze = event.payload.get("gaze_seconds", 1.0)
+            # 停留 20-40 秒，比"有人走了"事件的平均间隔短，
+            # 这样既足够让归属度真正回升，又不会一直挂着不离开。
+            self._person_until = time.time() + self._rng.uniform(20.0, 40.0)
+        elif event.name == "person_leave":
+            self._person_until = 0.0
+
         # 碰触类事件：短暂改变倾角，然后回正
         if event.duration > 0:
             tilt = event.payload.get("imu_tilt_deg", 0)
@@ -347,7 +364,37 @@ class EnvironmentSimulator:
                 "load": round(self._load, 2),
             }, qos=0)
 
+            await self._keep_person_present()
+
             await asyncio.sleep(2)
+
+    async def _keep_person_present(self) -> None:
+        """人在场期间持续刷新视觉帧。
+
+        person_approach 只发一帧，之后视野就空了。而感知层的归属度恢复
+        依赖感受事件持续出现，衰减却是每时每刻的——实测一次 approach
+        (intensity 0.28) 只能补 1.12 点，2.2 秒就被 0.5 点/秒的衰减吃光，
+        于是"有人来了"这件事在生理上几乎不留痕迹，模型依旧困在孤独里。
+
+        现实里人走过来会待一会儿。这里用 `until` 时间戳表达这个状态，
+        期间每 2 秒重复一帧 vision，让"有人在"成为一个持续事实而不是
+        一次抖动。凝视秒数随在场时长增长，越待越有"被看见"的感觉。
+        """
+        if not self._person_until or time.time() > self._person_until:
+            self._person_until = 0.0
+            return
+
+        await self._publish(Topic.SENSOR_VISION, {
+            "distance_m": round(self._person_distance, 2),
+            "face_detected": True,
+            "gaze_seconds": round(min(6.0, self._person_gaze + 2.0), 1),
+            "ambient_light": self._circadian.ambient_light,
+            "event": "person_present",
+            # 不写 event_text：这不是"发生了某事"，而是"状态仍在持续"，
+            # 写成事件会让模型误以为每隔两秒又来了一个人。
+        }, qos=0)
+
+        self._person_gaze = min(6.0, self._person_gaze + 2.0)
 
     async def _event_loop(self) -> None:
         """事件循环：按场景密度随机注入。"""

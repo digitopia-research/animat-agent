@@ -1,0 +1,43 @@
+feat: make tool calls real, and stop the agent circling old conversations
+
+Three separate defects were keeping the agent from doing anything it said
+it wanted to do.
+
+Tool calls never reached the model's structured field. Qwen3 under
+llama-cpp-python writes <tool_call>{...}</tool_call> into the content and
+leaves tool_calls null. The dialogue path only read tool_calls, so a
+correct call was spoken aloud as text - which is where the bizarre
+"<did>web_search</did>" output came from. Parse the content instead, and
+teach _execute_tool_calls to accept the flat shape it returns.
+
+The <did>action/claim> self-report is removed. It was added to catch "says
+it will act but doesn't", but the model read the tag as an action slot and
+filled it with tool names. With tool calls genuinely working the tag has
+no job left, and it was actively polluting output.
+
+The last user message used to sit in context forever, so a stale request
+("check Shanghai weather and light yourself up") became a permanent
+unfinished task: improvised plans, no way to complete them, eight minutes
+of the same three sentences. Conversation history now carries timestamps
+and a 3-minute TTL before it enters spontaneous thought. Records without
+a timestamp are treated as expired, which also clears the backlog left by
+the previous version.
+
+Also fixes the motivation side:
+
+- approach/gaze now restore affiliation. Only caress/soothing did, so
+  someone standing right there counted for nothing and affiliation sat at
+  0 with PANIC permanently dominant.
+- exploration gains a replenishment path at all, via a satisfaction
+  feeling emitted only when a move actually executes.
+- need decay drops to a rate the world can keep up with. At 0.5/s against
+  one event every 3-5 minutes it could never be satisfied by any multiplier.
+- deviation is now max(0, ideal - current), so being sated no longer reads
+  as deprivation. Previously exploration at 98 against an ideal of 60
+  scored 0.63 and triggered PLAY "bored", which made it explore harder and
+  get more "bored" - a positive feedback loop that produced 45 moves.
+- env_simulator keeps a person present for 20-40s instead of one frame,
+  since a single approach restored 1.1 points against 0.5/s decay.
+
+Net effect: the agent moves when it is bored instead of narrating that it
+would like to, and stops relitigating conversations that ended minutes ago.

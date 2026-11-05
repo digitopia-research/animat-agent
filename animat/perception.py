@@ -49,6 +49,10 @@ class FeelingType(str, Enum):
     FATIGUE    = "fatigue"
     RECHARGING = "recharging"
     IMBALANCE  = "imbalance"
+    # 好奇心被满足。由意识层在真正执行了移动后发出——
+    # exploration 是唯一没有天然"补充源"的稳态指标，
+    # 它的满足只能来自主体自己真的去做了点什么。
+    SATISFACTION = "satisfaction"
 
 
 @dataclass
