@@ -334,6 +334,7 @@
   <input id="broker" value="ws://192.168.1.6:8083/mqtt" title="MQTT WebSocket 地址" style="width:200px">
   <button id="connectBtn">Connect</button>
   <a class="link-btn" href="index.html">← 监控台</a>
+  <a class="link-btn" href="body.html">身体 ↗</a>
   <div class="modes">
     <span class="lbl">Mode</span>
     <button class="mode-btn active" data-m="auto">Auto</button>
@@ -392,9 +393,7 @@
         <div class="stat-row"><span>光照</span><span class="stat-val" id="stLight">—</span></div>
         <div class="stat-row"><span>底噪</span><span class="stat-val" id="stDb">—</span></div>
         <div class="stat-row"><span>人类活动</span><span class="stat-val" id="stActivity">—</span></div>
-        <div class="stat-row" style="margin-top:11px"><span>电量</span><span class="stat-val" id="stBattery">—</span></div>
-        <div class="bar"><span id="barBattery" style="width:0%"></span></div>
-        <div class="stat-row" style="margin-top:10px"><span>体温</span><span class="stat-val" id="stTemp">—</span></div>
+        <div class="stat-row"><span>倾角</span><span class="stat-val" id="stTilt">—</span></div>
         <div class="stat-row"><span>认知负载</span><span class="stat-val" id="stLoad">—</span></div>
         <div class="stat-row"><span>已发事件</span><span class="stat-val" id="stCount">—</span></div>
         <div class="stat-row"><span>最近</span><span class="stat-val" id="stLast" style="font-size:10px;text-align:right;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">—</span></div>
@@ -579,14 +578,9 @@ function renderStatus(s) {
   if (s.ambient_db != null) $("stDb").textContent = Number(s.ambient_db).toFixed(0) + " dB";
   if (s.activity != null) $("stActivity").textContent = Number(s.activity).toFixed(2);
 
-  if (s.battery_pct != null) {
-    const b = Number(s.battery_pct);
-    $("stBattery").textContent = b.toFixed(0) + "%";
-    const bar = $("barBattery");
-    bar.style.width = Math.max(0, Math.min(100, b)) + "%";
-    bar.style.background = b < 20 ? "var(--red)" : b < 40 ? "var(--yellow)" : "var(--green)";
-  }
-  if (s.temperature != null) $("stTemp").textContent = Number(s.temperature).toFixed(1) + "°C";
+  // 电量与体温由 body.html 负责，本页不再显示，
+  // 避免出现两处读数不一致的情况。
+  if (s.imu_tilt_deg != null) $("stTilt").textContent = Number(s.imu_tilt_deg).toFixed(1) + "°";
   if (s.load != null) $("stLoad").textContent = Number(s.load).toFixed(2);
   if (s.event_count != null) $("stCount").textContent = s.event_count + " 次";
   if (s.last_event) {

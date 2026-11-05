@@ -158,12 +158,11 @@ class EnvironmentSimulator:
         self._running = False
         self._client: Optional[aiomqtt.Client] = None
 
-        # 内感状态（带因果）
-        self._battery = float(os.getenv("ANIMAT_ENV_BATTERY", "100"))
-        self._temperature = 37.0
+        # 内感状态：只保留本模块拥有的部分。
+        # 电量/体温/充电判定全部交给 simulator.py（body.html），
+        # 这里再存一份只会产生两个互相矛盾的"真相"。
         self._tilt = 0.0
-        self._charging = False
-        self._load = 0.0          # 最近的"认知负载"，驱动耗电与升温
+        self._load = 0.0          # 认知负载，反映在放电叙事的强度上
 
         # 当前环境快照
         self._circadian = circadian_now()
@@ -258,10 +257,9 @@ class EnvironmentSimulator:
             name="gentle_bump",
             topic=Topic.SENSOR_INTERO,
             payload={
-                "battery_pct": round(self._battery, 1),
-                "temperature": round(self._temperature, 1),
+                # 只发倾角（这是"世界碰了身体"造成的物理扰动），
+                # 不带 battery/temperature —— 那两个字段归 simulator.py。
                 "imu_tilt_deg": round(self._rng.choice([-1, 1]) * self._rng.uniform(2.0, 4.0), 1),
-                "charging": self._charging,
                 "event": "gentle_bump",
                 "event_text": "身体被轻碰了一下，晃了晃",
             },
@@ -324,37 +322,29 @@ class EnvironmentSimulator:
 
     # ── 主循环 ──
     async def _interoception_loop(self) -> None:
-        """内感循环：电量/体温/倾角，全部带因果。"""
+        """环境侧的内感补充：只发环境量，不发身体数值。
+
+        电量与体温的唯一权威来源是 simulator.py（body.html 控制的那个）。
+        早先这里也算电量，结果两个进程每 2 秒各写一次
+        animat/sensor/interoception，数值在两种模型之间来回跳，
+        在网页上完全无法判断某次掉电是认知负载算的还是人为设的。
+        现在这里只发布昼夜相关的环境量（光照、底噪），
+        让 Animat 在同一份内感里既知道"外面天黑了"也知道"身体还有电"。
+
+        认知负载仍然保留：它影响的是放电速度的叙事，不再直接改数值。
+        """
         while self._running:
             circ = circadian_now()
             self._circadian = circ
-
-            if self._charging:
-                self._battery = min(100.0, self._battery + 3.0)
-                self._temperature = min(45.0, self._temperature + 0.05)
-                if self._battery >= 100:
-                    self._charging = False
-                    logger.info("🔋 电量已满，停止充电")
-            else:
-                # 基础放电 + 认知负载额外消耗：思考越活跃，掉电越快
-                drain = 0.05 + 0.15 * self._load
-                self._battery = max(0.0, self._battery - drain)
-                # 体温：负载升高，空闲回落。范围控制在 36.8~38.0，
-                # 超出正常区间会让模型编造"过热"叙事。
-                target = 37.0 + 0.8 * self._load
-                self._temperature += (target - self._temperature) * 0.25
 
             # 负载自然衰减（没有新思维时会回落）
             self._load = max(0.0, self._load - 0.08)
 
             await self._publish(Topic.SENSOR_INTERO, {
-                "battery_pct": round(self._battery, 1),
-                "temperature": round(self._temperature, 1),
-                "imu_tilt_deg": round(self._tilt, 1),
-                "charging": self._charging,
                 "ambient_light": circ.ambient_light,
                 "ambient_db": circ.ambient_db,
                 "event_text": circ.describe(),
+                "load": round(self._load, 2),
             }, qos=0)
 
             await asyncio.sleep(2)
@@ -392,10 +382,9 @@ class EnvironmentSimulator:
                     self._load = min(1.0, self._load + 0.35)
                 elif cmd == "move":
                     self._load = min(1.0, self._load + 0.5)
-                if cmd == "move":
-                    direction = (payload.get("params") or {}).get("direction", "")
-                    if direction == "charger":
-                        self._charging = True
+                # 不再因为"去找充电器"就自行改充电状态：
+                # 充电由 simulator.py 根据同一条 motor 指令处理，
+                # 这里插一脚会让两边状态不一致。
             elif topic == Topic.CORTEX_THOUGHT:
                 # 每产生一次思维就计入负载
                 self._load = min(1.0, self._load + 0.12)
@@ -474,10 +463,9 @@ class EnvironmentSimulator:
             "ambient_light": self._circadian.ambient_light,
             "ambient_db": self._circadian.ambient_db,
             "activity": self._circadian.activity,
-            "battery_pct": round(self._battery, 1),
-            "temperature": round(self._temperature, 1),
+            # 电量/体温/充电不在这里报：它们归 body_simulator 管，
+            # 本页只提供环境量与认知负载。
             "imu_tilt_deg": round(self._tilt, 1),
-            "charging": self._charging,
             "load": round(self._load, 2),
             "event_count": self._event_count,
             "last_event": self._last_event,
@@ -490,8 +478,8 @@ class EnvironmentSimulator:
             f"  场景    : {SCENES[self._scene]['label']}（间隔 {lo}-{hi}s）\n"
             f"  事件开关: {'开' if self._events_enabled else '关'}\n"
             f"  环境    : {self._circadian.describe()}\n"
-            f"  内感    : 电量{self._battery:.1f}% 体温{self._temperature:.1f}°C "
-            f"倾角{self._tilt:.1f}° 负载{self._load:.2f}\n"
+            f"  倾角{self._tilt:.1f}° 认知负载{self._load:.2f}"
+            f"（电量与体温见 body.html）\n"
             f"  已发事件: {self._event_count} 次，最近: {self._last_event}"
         )
 

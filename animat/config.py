@@ -55,6 +55,15 @@ class Topic:
     ENV_CONTROL     = "animat/env/control"         # 下发命令给 env_simulator
     ENV_STATUS      = "animat/env/status"          # env_simulator 的状态与回执
 
+    # ── 身体模拟器的远程控制 ──
+    # simulator.py 与 env_simulator.py 是两套独立的分工：
+    #   simulator.py    模拟 Animat 的"身体"——电量、体温、充电
+    #   env_simulator   模拟 Animat 所处的"世界"——昼夜、光照、路人
+    # 二者的数据都会落到 SENSOR_INTERO，所以设计上身体状态只由
+    # simulator.py 写入，世界只负责环境量，避免两边互相覆盖。
+    BODY_CONTROL    = "animat/body/control"        # 下发命令给 simulator
+    BODY_STATUS     = "animat/body/status"         # simulator 的状态与回执
+
 
 # ─────────────────── 内稳态指标 ───────────────────
 class HomeostasisConfig:

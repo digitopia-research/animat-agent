@@ -1,0 +1,664 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Animat 身体模拟器 — Body Console</title>
+<!--
+  与 world.html 并列的第二套控制台，职责严格区分：
+
+    world.html  世界 → 昼夜、光照、路人、触碰、噪声   (env_simulator)
+    body.html   身体 → 电量、体温、充电、倾角        (simulator)
+
+  分开的原因不只是"页面清爽"：两套模拟器都会往 SENSOR_INTERO 写数据，
+  混在一起调试时根本无法判断某个电量跳变是自己按的，还是世界那边的
+  认知负载模型算出来的。物理上分开就不存在这个歧义。
+
+  通信：发布 animat/body/control，订阅 animat/body/status。
+-->
+<script src="vendor/mqtt.min.js"></script>
+<style>
+  :root {
+    --accent-2: #22d3ee;
+    --yellow: #e8b339;
+    --red: #e5484d;
+    --purple: #8b5cf6;
+    --radius: 4px;
+    --mono: "JetBrains Mono", "SF Mono", "Cascadia Code", Consolas, monospace;
+    --sans: "Inter", "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  }
+
+  body[data-resolved="dark"] {
+    --bg-0: #07080a;
+    --bg-panel: rgba(14, 15, 18, .9);
+    --bg-card: rgba(255, 255, 255, .022);
+    --bg-inset: rgba(0, 0, 0, .34);
+    --txt: #f0f2f6;
+    --txt-dim: #9aa3b6;
+    --muted: #626b80;
+    --accent: #3ddc97;
+    --green: #3ddc97;
+    --accent-soft: rgba(61, 220, 151, .12);
+    --line: rgba(255, 255, 255, .085);
+    --line-strong: rgba(255, 255, 255, .16);
+    --glow-1: rgba(61, 220, 151, .07);
+    --glow-2: rgba(34, 211, 238, .06);
+  }
+  body[data-resolved="light"] {
+    --bg-0: #f7f8fa;
+    --bg-panel: rgba(255, 255, 255, .92);
+    --bg-card: rgba(15, 23, 42, .022);
+    --bg-inset: rgba(15, 23, 42, .035);
+    --txt: #12161f;
+    --txt-dim: #4a5468;
+    --muted: #8791a5;
+    --accent: #0a9d63;
+    --green: #0a9d63;
+    --accent-soft: rgba(10, 157, 99, .09);
+    --line: rgba(15, 23, 42, .1);
+    --line-strong: rgba(15, 23, 42, .18);
+    --glow-1: rgba(10, 157, 99, .07);
+    --glow-2: rgba(34, 211, 238, .07);
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font-family: var(--sans); color: var(--txt);
+    min-height: 100vh; background: var(--bg-0);
+    background-image:
+      radial-gradient(900px 520px at 8% -12%, var(--glow-1), transparent 60%),
+      radial-gradient(760px 440px at 94% 6%, var(--glow-2), transparent 58%);
+    -webkit-font-smoothing: antialiased; letter-spacing: .1px;
+    transition: background-color .4s ease;
+  }
+  ::selection { background: var(--accent-soft); }
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-thumb { background: rgba(125,125,145,.22); }
+
+  header {
+    padding: 0 22px; min-height: 54px;
+    background: var(--bg-panel);
+    backdrop-filter: blur(18px) saturate(150%);
+    border-bottom: 1px solid var(--line);
+    display: flex; align-items: center; gap: 16px;
+    flex-wrap: wrap; padding-top: 8px; padding-bottom: 8px;
+    position: sticky; top: 0; z-index: 10;
+  }
+  @media (min-width: 901px) {
+    header { flex-wrap: nowrap; padding-top: 0; padding-bottom: 0; min-height: 54px; }
+  }
+
+  header h1 {
+    font-size: 12.5px; margin: 0; font-weight: 700; letter-spacing: 2.4px;
+    text-transform: uppercase; display: flex; align-items: center; gap: 10px;
+    white-space: nowrap;
+  }
+  header h1 .logo {
+    width: 20px; height: 20px; display: grid; place-items: center;
+    font-size: 11px; color: var(--green);
+    border: 1px solid var(--line-strong); border-radius: 3px;
+    box-shadow: inset 0 0 10px rgba(61,220,151,.16);
+  }
+  header h1 .sub {
+    font-weight: 400; font-size: 9.5px; color: var(--muted); letter-spacing: 1.6px;
+    padding-left: 12px; margin-left: 2px; border-left: 1px solid var(--line);
+  }
+
+  .conn {
+    display: flex; align-items: center; gap: 7px; font-size: 10.5px; color: var(--txt-dim);
+    padding: 5px 11px; border-radius: 2px; border: 1px solid var(--line);
+    letter-spacing: 1.1px; text-transform: uppercase; white-space: nowrap;
+  }
+  .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--red); transition: .3s; }
+  .dot.ok { background: var(--green); box-shadow: 0 0 8px var(--green); animation: pulseDot 2.6s ease-in-out infinite; }
+  @keyframes pulseDot { 0%,100% { opacity: 1; } 50% { opacity: .3; } }
+
+  input[type="text"] {
+    background: var(--bg-inset); border: 1px solid var(--line); color: var(--txt);
+    padding: 6px 10px; border-radius: 2px; font-size: 10.5px;
+    font-family: var(--mono); transition: .18s;
+  }
+  input[type="text"]:focus { outline: none; border-color: var(--accent-2); }
+
+  button {
+    background: transparent; color: var(--accent-2);
+    border: 1px solid var(--line-strong); padding: 6px 14px;
+    border-radius: 2px; cursor: pointer;
+    font-size: 10.5px; font-weight: 600; letter-spacing: 1.2px; text-transform: uppercase;
+    transition: .18s; font-family: inherit;
+  }
+  button:hover { border-color: var(--accent-2); background: rgba(34,211,238,.08); }
+  button:active { opacity: .7; }
+  button:disabled { opacity: .35; cursor: not-allowed; }
+  button.sec { color: var(--txt-dim); border-color: var(--line); }
+  button.sec:hover { color: var(--txt); border-color: var(--line-strong); background: var(--bg-card); }
+  button.on {
+    color: var(--accent); border-color: var(--accent);
+    background: var(--accent-soft); font-weight: 700;
+  }
+  button.danger { color: var(--red); }
+  button.danger:hover { border-color: var(--red); background: rgba(229,72,77,.08); }
+
+  .modes { display: flex; margin-left: auto; align-items: center; }
+  .modes .lbl { font-size: 9px; letter-spacing: 1.4px; color: var(--muted); margin-right: 8px; text-transform: uppercase; }
+  .mode-btn {
+    padding: 5px 11px; font-size: 10px; color: var(--muted);
+    border: 1px solid var(--line); border-radius: 0; margin-left: -1px;
+  }
+  .mode-btn:first-of-type { border-radius: 3px 0 0 3px; margin-left: 0; }
+  .mode-btn:last-of-type { border-radius: 0 3px 3px 0; }
+  .mode-btn.active { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); position: relative; z-index: 1; }
+
+  .link-btn {
+    text-decoration: none; font-size: 10px; letter-spacing: 1.2px; text-transform: uppercase;
+    color: var(--txt-dim); border: 1px solid var(--line); padding: 6px 12px; border-radius: 2px;
+    transition: .18s; white-space: nowrap;
+  }
+  .link-btn:hover { color: var(--accent-2); border-color: var(--accent-2); background: rgba(34,211,238,.08); }
+
+  /* ── 窄屏适配 ── */
+  @media (max-width: 900px) {
+    header { gap: 10px; padding: 10px 14px; }
+    header h1 { flex: 1 1 100%; font-size: 11.5px; letter-spacing: 1.8px; }
+    header h1 .sub { display: none; }
+    .conn { flex: 0 0 auto; }
+    input[type="text"] { flex: 1 1 130px; min-width: 0; }
+    #connectBtn { flex: 0 0 auto; padding: 6px 12px; }
+    .link-btn { flex: 0 0 auto; }
+    .modes { margin-left: 0; flex: 0 0 auto; }
+    .modes .lbl { display: none; }
+    .mode-btn { padding: 5px 9px; }
+  }
+  @media (max-width: 420px) {
+    header { gap: 8px; padding: 9px 11px; }
+    header h1 { font-size: 11px; letter-spacing: 1.4px; }
+    .conn { font-size: 9.5px; padding: 4px 8px; letter-spacing: .6px; }
+    input[type="text"] { font-size: 10px; padding: 5px 8px; }
+    #connectBtn { font-size: 9.5px; padding: 5px 9px; }
+    .link-btn { font-size: 9.5px; padding: 5px 9px; }
+    .mode-btn { font-size: 9px; padding: 4px 7px; }
+  }
+
+  main {
+    max-width: 1080px; margin: 0 auto; padding: 26px 22px 60px;
+    display: grid; grid-template-columns: 1fr 340px; gap: 20px; align-items: start;
+  }
+  @media (max-width: 900px) {
+    main { grid-template-columns: 1fr; gap: 16px; padding: 16px 14px 44px; }
+    main > div > .panel + .panel { margin-top: 16px; }
+  }
+
+  .panel {
+    background: var(--bg-panel); border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 16px 18px 18px; backdrop-filter: blur(14px);
+  }
+  .panel + .panel { margin-top: 20px; }
+  .panel h2 {
+    font-size: 9px; text-transform: uppercase; letter-spacing: 2px;
+    color: var(--muted); margin: 0 0 14px; font-weight: 700;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .panel h2::before { content: ""; width: 1px; height: 9px; background: var(--accent-2); opacity: .8; }
+  .panel h2::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+  .panel .note { font-size: 10.5px; color: var(--muted); line-height: 1.6; margin: -4px 0 14px; }
+
+  /* ── 电量主仪表 ── */
+  .gauge-wrap { display: flex; align-items: center; gap: 26px; flex-wrap: wrap; }
+  .gauge { position: relative; width: 148px; height: 148px; flex: 0 0 auto; }
+  .gauge svg { transform: rotate(-90deg); width: 100%; height: 100%; }
+  .gauge .track { stroke: rgba(125,125,145,.16); }
+  .gauge .fill { transition: stroke-dashoffset .6s cubic-bezier(.4,0,.2,1), stroke .4s; stroke-linecap: round; }
+  .gauge .inner {
+    position: absolute; inset: 0; display: grid; place-items: center; align-content: center;
+    text-align: center; gap: 2px;
+  }
+  .gauge .pct {
+    font-family: var(--mono); font-size: 30px; font-weight: 700;
+    font-variant-numeric: tabular-nums; line-height: 1;
+  }
+  .gauge .cap { font-size: 8.5px; letter-spacing: 1.6px; color: var(--muted); text-transform: uppercase; }
+
+  .gauge-side { flex: 1 1 200px; min-width: 0; }
+  .kv { display: flex; justify-content: space-between; align-items: baseline; padding: 6px 0; font-size: 11.5px; color: var(--txt-dim); border-bottom: 1px solid var(--line); }
+  .kv:last-child { border-bottom: none; }
+  .kv b { font-family: var(--mono); font-variant-numeric: tabular-nums; color: var(--txt); font-weight: 600; }
+
+  .badge {
+    display: inline-flex; align-items: center; gap: 6px; font-size: 10px;
+    padding: 4px 10px; border-radius: 2px; border: 1px solid var(--line-strong);
+    letter-spacing: 1px; text-transform: uppercase; font-weight: 600;
+  }
+  .badge.charge { color: var(--green); border-color: var(--green); background: var(--accent-soft); }
+  .badge.idle { color: var(--muted); }
+
+  /* ── 操作按钮 ── */
+  .btn-row { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
+  .btn-row button { flex: 1 1 auto; min-width: 96px; padding: 10px 8px; }
+
+  .slider-block { margin-bottom: 16px; }
+  .slider-block:last-child { margin-bottom: 0; }
+  .slider-head {
+    display: flex; justify-content: space-between; align-items: baseline;
+    margin-bottom: 7px; font-size: 11.5px; color: var(--txt-dim);
+  }
+  .slider-head .val { font-family: var(--mono); font-weight: 600; color: var(--txt); font-size: 12px; }
+  input[type="range"] {
+    -webkit-appearance: none; appearance: none;
+    width: 100%; height: 3px; border-radius: 2px; outline: none;
+    background: rgba(125,125,145,.2); cursor: pointer;
+  }
+  input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none;
+    width: 13px; height: 13px; border-radius: 50%;
+    background: var(--accent-2); border: none; cursor: pointer;
+    box-shadow: 0 0 0 3px rgba(34,211,238,.14);
+  }
+  input[type="range"]::-moz-range-thumb {
+    width: 13px; height: 13px; border-radius: 50%; border: none;
+    background: var(--accent-2); cursor: pointer;
+  }
+  .slider-foot { display: flex; justify-content: space-between; margin-top: 5px; }
+  .slider-foot .hint { font-size: 9px; color: var(--muted); font-family: var(--mono); }
+  .slider-foot button { padding: 3px 10px; font-size: 9px; }
+
+  /* ── 回执日志 ── */
+  .acklog {
+    font-family: var(--mono); font-size: 10px; line-height: 1.75;
+    background: var(--bg-inset); border: 1px solid var(--line);
+    border-radius: 3px; padding: 8px 10px; max-height: 220px; overflow-y: auto;
+  }
+  .acklog .ln { display: flex; gap: 7px; padding: 1px 0; animation: fadeSlide .28s ease-out; }
+  @keyframes fadeSlide { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: none; } }
+  .acklog .ln .ts { color: var(--muted); flex: 0 0 auto; font-size: 9px; padding-top: 1px; }
+  .acklog .ln .tx { flex: 1; word-break: break-word; }
+  .acklog .ln.ok .tx { color: var(--green); }
+  .acklog .ln.err .tx { color: var(--red); }
+  .acklog .ln.info .tx { color: var(--muted); }
+  .empty { color: var(--muted); font-size: 10.5px; }
+
+  #toast {
+    position: fixed; left: 50%; bottom: 26px; transform: translate(-50%, 18px);
+    background: var(--bg-panel); border: 1px solid var(--line-strong);
+    padding: 9px 18px; border-radius: 3px; font-size: 11px; color: var(--txt);
+    letter-spacing: .4px; opacity: 0; pointer-events: none; transition: .22s;
+    box-shadow: 0 8px 30px rgba(0,0,0,.28); z-index: 50;
+  }
+  #toast.show { opacity: 1; transform: translate(-50%, 0); }
+  #toast.bad { border-color: rgba(229,72,77,.5); color: var(--red); }
+</style>
+</head>
+<body data-mode="auto" data-resolved="dark">
+
+<header>
+  <h1>
+    <span class="logo">▣</span>
+    Body Simulator
+    <span class="sub">身体状态 · 电量体温</span>
+  </h1>
+  <div class="conn">
+    <span class="dot" id="connDot"></span>
+    <span id="connText">未连接</span>
+  </div>
+  <input id="broker" value="ws://192.168.1.6:8083/mqtt" title="MQTT WebSocket 地址" style="width:200px">
+  <button id="connectBtn">Connect</button>
+  <a class="link-btn" href="index.html">← 监控台</a>
+  <a class="link-btn" href="world.html">世界 ↗</a>
+  <div class="modes">
+    <span class="lbl">Mode</span>
+    <button class="mode-btn active" data-m="auto">Auto</button>
+    <button class="mode-btn" data-m="light">Light</button>
+    <button class="mode-btn" data-m="dark">Dark</button>
+  </div>
+</header>
+
+<main>
+  <div>
+    <!-- 电量主仪表 -->
+    <div class="panel">
+      <h2>当前身体状态</h2>
+      <div class="gauge-wrap">
+        <div class="gauge">
+          <svg viewBox="0 0 120 120">
+            <circle class="track" cx="60" cy="60" r="52" fill="none" stroke-width="7"></circle>
+            <circle class="fill" id="gaugeFill" cx="60" cy="60" r="52" fill="none" stroke-width="7"
+                    stroke-dasharray="326.7" stroke-dashoffset="326.7" stroke="#3ddc97"></circle>
+          </svg>
+          <div class="inner">
+            <span class="pct" id="gPct">—</span>
+            <span class="cap">电量</span>
+          </div>
+        </div>
+        <div class="gauge-side">
+          <div class="kv"><span>充电状态</span><span id="bCharge"><span class="badge idle">—</span></span></div>
+          <div class="kv"><span>体温</span><b id="bTemp">—</b></div>
+          <div class="kv"><span>放电速率</span><b id="bRate">—</b></div>
+          <div class="kv"><span>倾角</span><b id="bTilt">—</b></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 充电控制 -->
+    <div class="panel">
+      <h2>充电控制</h2>
+      <div class="note">
+        这里的充电接口是手动开关。Animat 自己走去充电器（move → charger）时，
+        也会由它自己的动作触发充电，不经过这个页面。
+      </div>
+      <div class="btn-row">
+        <button id="btnCharge">开始充电</button>
+        <button id="btnStop" class="sec">停止充电</button>
+        <button id="btnReset" class="sec">重置电量</button>
+      </div>
+    </div>
+
+    <!-- 数值设定 -->
+    <div class="panel">
+      <h2>数值设定</h2>
+      <div class="note">
+        拖动后点「应用」才会生效。数值会在下一个内感周期（约 2 秒）同步给 Animat。
+      </div>
+
+      <div class="slider-block">
+        <div class="slider-head">
+          <span>电量</span><span class="val" id="vBattery">—</span>
+        </div>
+        <input type="range" id="rBattery" min="0" max="100" step="1" value="100">
+        <div class="slider-foot">
+          <span class="hint">0 — 100 %</span>
+          <button class="sec" id="applyBattery">应用</button>
+        </div>
+      </div>
+
+      <div class="slider-block">
+        <div class="slider-head">
+          <span>体温</span><span class="val" id="vTemp">—</span>
+        </div>
+        <input type="range" id="rTemp" min="30" max="50" step="0.5" value="37">
+        <div class="slider-foot">
+          <span class="hint">30 — 50 °C</span>
+          <button class="sec" id="applyTemp">应用</button>
+        </div>
+      </div>
+
+      <div class="slider-block">
+        <div class="slider-head">
+          <span>放电速率</span><span class="val" id="vRate">—</span>
+        </div>
+        <input type="range" id="rRate" min="0" max="2" step="0.01" value="0.05">
+        <div class="slider-foot">
+          <span class="hint">0 — 2 %/周期，越大掉电越快</span>
+          <button class="sec" id="applyRate">应用</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div>
+    <div class="panel">
+      <h2>回执</h2>
+      <div class="acklog" id="ackLog"><span class="empty">（暂无命令）</span></div>
+    </div>
+
+    <div class="panel">
+      <h2>说明</h2>
+      <div class="note" style="margin:0">
+        本页只控制<b>身体</b>：电量、体温、充电。<br>
+        世界层面的事件（路人、光线、噪声、触碰）请前往
+        <a href="world.html" style="color:var(--accent-2)">世界模拟器 ↗</a>。<br><br>
+        两套模拟器都会写内感话题，所以身体数值以本页为准；
+        世界的认知负载只影响掉电速度，不直接改写数值。
+      </div>
+    </div>
+  </div>
+</main>
+
+<div id="toast"></div>
+
+<script>
+const TOPIC = {
+  BODY_CONTROL: "animat/body/control",
+  BODY_STATUS:  "animat/body/status",
+};
+
+let client = null;
+let lastStatus = null;
+let lastStatusAt = 0;
+
+const $ = (id) => document.getElementById(id);
+const ackLog = $("ackLog");
+const toastEl = $("toast");
+
+let toastTimer = null;
+function toast(msg, bad) {
+  toastEl.textContent = msg;
+  toastEl.classList.toggle("bad", !!bad);
+  toastEl.classList.add("show");
+  if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => toastEl.classList.remove("show"), 2200);
+}
+
+function stamp() {
+  const d = new Date();
+  return [d.getHours(), d.getMinutes(), d.getSeconds()]
+    .map(n => String(n).padStart(2, "0")).join(":");
+}
+
+function ack(msg, cls) {
+  const ph = ackLog.querySelector(".empty");
+  if (ph) ph.remove();
+  const div = document.createElement("div");
+  div.className = "ln " + (cls || "info");
+  div.innerHTML = `<span class="ts">${stamp()}</span><span class="tx">${
+    String(msg).replace(/</g, "&lt;")}</span>`;
+  ackLog.appendChild(div);
+  while (ackLog.childElementCount > 80) ackLog.removeChild(ackLog.firstChild);
+  ackLog.scrollTop = ackLog.scrollHeight;
+}
+
+// ───────── 发布命令 ─────────
+function send(cmd, arg) {
+  if (!client) { toast("尚未建立连接", true); ack("✖ 未创建 client", "err"); return false; }
+  if (!client.connected) {
+    toast("未连接 broker，命令未发送", true);
+    ack("✖ client.connected = false", "err");
+    return false;
+  }
+  const payload = { cmd: cmd };
+  if (arg !== undefined) payload.arg = arg;
+  const body = JSON.stringify(payload);
+  try {
+    client.publish(TOPIC.BODY_CONTROL, body, { qos: 1 }, (err) => {
+      if (err) { ack("✖ publish 失败: " + err.message, "err"); toast("发布失败", true); }
+    });
+  } catch (e) {
+    ack("✖ publish 抛异常: " + e.message, "err");
+    return false;
+  }
+  ack(`→ 已发出 ${body}`, "info");
+  return true;
+}
+
+// ───────── 按钮 ─────────
+$("btnCharge").onclick = () => { if (send("charge")) toast("开始充电"); };
+$("btnStop").onclick   = () => { if (send("stop"))   toast("停止充电"); };
+$("btnReset").onclick  = () => { if (send("reset"))  toast("电量已重置"); };
+
+// ───────── 滑块 ─────────
+const rBattery = $("rBattery"), rTemp = $("rTemp"), rRate = $("rRate");
+
+function syncLabels() {
+  $("vBattery").textContent = rBattery.value + " %";
+  $("vTemp").textContent = Number(rTemp.value).toFixed(1) + " °C";
+  $("vRate").textContent = Number(rRate.value).toFixed(2) + " %";
+}
+[rBattery, rTemp, rRate].forEach(r => r.addEventListener("input", syncLabels));
+
+$("applyBattery").onclick = () => {
+  if (send("scale", rBattery.value)) toast("电量 → " + rBattery.value + "%");
+};
+$("applyTemp").onclick = () => {
+  if (send("temp", rTemp.value)) toast("体温 → " + rTemp.value + "°C");
+};
+$("applyRate").onclick = () => {
+  if (send("discharge", rRate.value)) toast("放电速率 → " + rRate.value);
+};
+
+// ───────── 仪表渲染 ─────────
+const CIRC = 2 * Math.PI * 52;   // r=52 → 326.7
+
+function setGauge(pct) {
+  const p = Math.max(0, Math.min(100, Number(pct)));
+  const fill = $("gaugeFill");
+  fill.setAttribute("stroke-dashoffset", String(CIRC * (1 - p / 100)));
+  // 低电量转红，与监控台的阈值保持一致（20% 危险 / 40% 偏低）
+  const color = p < 20 ? "var(--red)" : p < 40 ? "var(--yellow)" : "var(--green)";
+  fill.setAttribute("stroke", color);
+  const el = $("gPct");
+  el.textContent = Math.round(p) + "%";
+  el.style.color = color;
+}
+
+function renderStatus(s) {
+  lastStatus = s;
+  lastStatusAt = Date.now();
+
+  if (s.battery_pct != null) {
+    setGauge(s.battery_pct);
+    // 只在用户没在拖拽时同步滑块，否则会打断操作
+    if (document.activeElement !== rBattery) rBattery.value = Math.round(s.battery_pct);
+  }
+  if (s.temperature != null) {
+    $("bTemp").textContent = Number(s.temperature).toFixed(1) + " °C";
+    if (document.activeElement !== rTemp) rTemp.value = Number(s.temperature).toFixed(1);
+  }
+  if (s.discharge_rate != null) {
+    $("bRate").textContent = Number(s.discharge_rate).toFixed(2) + " %";
+    if (document.activeElement !== rRate) rRate.value = Number(s.discharge_rate).toFixed(2);
+  }
+  if (s.imu_tilt_deg != null) $("bTilt").textContent = Number(s.imu_tilt_deg).toFixed(1) + "°";
+
+  const chg = !!s.charging;
+  $("bCharge").innerHTML = chg
+    ? '<span class="badge charge">⚡ 充电中</span>'
+    : '<span class="badge idle">放电中</span>';
+  $("btnCharge").classList.toggle("on", chg);
+
+  syncLabels();
+}
+
+// 模拟器每 2 秒广播一次，超过 12 秒没收到就说明它没在跑
+setInterval(() => {
+  if (!lastStatus) return;
+  const stale = Date.now() - lastStatusAt > 12000;
+  $("connText").textContent = stale ? "模拟器离线" : "已连接";
+  $("connDot").classList.toggle("ok", !stale);
+}, 2000);
+
+// ───────── MQTT ─────────
+function setConn(ok, msg) {
+  $("connDot").classList.toggle("ok", ok);
+  $("connText").textContent = msg;
+}
+
+function connect() {
+  const url = $("broker").value.trim();
+  if (!url) { ack("✖ broker 地址为空", "err"); return; }
+  if (typeof mqtt === "undefined") {
+    ack("✖ mqtt.js 未加载，检查 vendor/mqtt.min.js", "err"); return;
+  }
+  if (client) { try { client.end(true); } catch (e) {} }
+  setConn(false, "连接中…");
+  ack("正在连接 " + url + " …", "info");
+
+  client = mqtt.connect(url, {
+    clientId: "animat-body-" + Math.random().toString(16).slice(2),
+    connectTimeout: 10000,
+    reconnectPeriod: 3000,
+  });
+
+  client.on("connect", () => {
+    setConn(true, "已连接");
+    ack("✔ 已连接 broker", "ok");
+    client.subscribe([TOPIC.BODY_STATUS], { qos: 0 }, (err) => {
+      if (err) ack("✖ 订阅状态话题失败: " + err.message, "err");
+      else ack("已订阅 " + TOPIC.BODY_STATUS + "，等待模拟器状态…", "info");
+    });
+    send("status");
+  });
+
+  client.on("error", (e) => {
+    setConn(false, "错误");
+    ack("✖ 连接错误: " + (e && e.message ? e.message : e), "err");
+  });
+  client.on("close", () => setConn(false, "已断开"));
+  client.on("reconnect", () => setConn(false, "重连中…"));
+  client.on("offline", () => setConn(false, "离线"));
+
+  client.on("message", (topic, payload) => {
+    if (topic !== TOPIC.BODY_STATUS) return;
+    let data;
+    try { data = JSON.parse(payload.toString()); } catch (e) { return; }
+    if (data.type === "ack") {
+      ack((data.ok ? "✔ " : "✖ ") + (data.msg || data.cmd || ""), data.ok ? "ok" : "err");
+      if (!data.ok) toast(data.msg || "命令失败", true);
+      return;
+    }
+    renderStatus(data);
+  });
+}
+
+// 打开即连：这是操作台，不该再点一次
+$("connectBtn").onclick = connect;
+
+// ───────── 显示模式 ─────────
+const MODE_KEY = "animat_body_mode";
+const MODES = ["auto", "light", "dark"];
+const mql = window.matchMedia ? window.matchMedia("(prefers-color-scheme: light)") : null;
+
+let store = (function () {
+  try {
+    localStorage.setItem("__b", "1"); localStorage.removeItem("__b");
+    return {
+      get(k) { try { return localStorage.getItem(k); } catch (e) { return null; } },
+      set(k, v) { try { localStorage.setItem(k, v); } catch (e) {} },
+    };
+  } catch (e) {
+    const mem = Object.create(null);
+    return { get: (k) => mem[k] ?? null, set: (k, v) => { mem[k] = v; } };
+  }
+})();
+
+let currentMode = "auto";
+
+function resolveMode(m) {
+  if (m === "light" || m === "dark") return m;
+  if (mql) return mql.matches ? "light" : "dark";
+  const h = new Date().getHours();
+  return (h >= 7 && h < 19) ? "light" : "dark";
+}
+
+function applyMode(mode, persist) {
+  if (!MODES.includes(mode)) mode = "auto";
+  currentMode = mode;
+  document.body.dataset.mode = mode;
+  document.body.dataset.resolved = resolveMode(mode);
+  document.querySelectorAll(".mode-btn").forEach(b =>
+    b.classList.toggle("active", b.dataset.m === mode));
+  if (persist) store.set(MODE_KEY, mode);
+}
+
+document.querySelectorAll(".mode-btn").forEach(b => {
+  b.onclick = () => applyMode(b.dataset.m, true);
+});
+if (mql) {
+  const onChange = () => { if (currentMode === "auto") applyMode("auto", false); };
+  if (mql.addEventListener) mql.addEventListener("change", onChange);
+  else if (mql.addListener) mql.addListener(onChange);
+}
+applyMode(store.get(MODE_KEY) || "auto", false);
+
+syncLabels();
+connect();
+</script>
+</body>
+</html>

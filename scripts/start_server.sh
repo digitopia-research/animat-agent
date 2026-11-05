@@ -4,7 +4,7 @@
 # 用法:
 #   ./scripts/start_server.sh          # 启动（若已在跑则跳过）
 #   ./scripts/start_server.sh start    # 同上
-#   ./scripts/start_server.sh stop     # 停止 animat 与 env_simulator（不动 MQTT/Redis）
+#   ./scripts/start_server.sh stop     # 停止 animat / env_simulator / body_simulator / webui（不动 MQTT/Redis）
 #   ./scripts/start_server.sh restart  # stop + start
 #   ./scripts/start_server.sh status   # 查看各组件状态
 #
@@ -21,6 +21,7 @@ PROJECT_DIR="/root/Workspace/animat-agent"
 LOG_DIR="/tmp"
 ANIMAT_LOG="${LOG_DIR}/animat.log"
 ENV_SIM_LOG="${LOG_DIR}/env_simulator.log"
+BODY_SIM_LOG="${LOG_DIR}/body_simulator.log"
 WEBUI_LOG="${LOG_DIR}/webui.log"
 ANIMAT_BIN="${PROJECT_DIR}/.venv/bin/animat"
 PYTHON_BIN="${PROJECT_DIR}/.venv/bin/python"
@@ -37,6 +38,10 @@ animat_running() {
 
 env_sim_running() {
     pgrep -f "animat.env_simulator" >/dev/null 2>&1
+}
+
+body_sim_running() {
+    pgrep -f "animat.simulator" >/dev/null 2>&1
 }
 
 webui_running() {
@@ -146,6 +151,51 @@ stop_env_sim() {
     env_sim_running && echo "[!] env_simulator 仍未停止" || echo "[ok] env_simulator 已停止"
 }
 
+start_body_sim() {
+    if [ "${ANIMAT_NO_BODY_SIM:-0}" = "1" ]; then
+        echo "[ok] 已跳过 body_simulator (ANIMAT_NO_BODY_SIM=1)"
+        return
+    fi
+    if body_sim_running; then
+        echo "[ok] body_simulator 已在运行"
+        return
+    fi
+    cd "${PROJECT_DIR}"
+    echo "[..] 启动 body_simulator（身体状态）"
+    # 只管电量/体温/充电。世界层面的事件由 env_simulator 负责，
+    # 两者都写 SENSOR_INTERO，分工见 animat/simulator.py 顶部说明。
+    # 手动调整请打开 http://<本机IP>:${WEBUI_PORT}/body.html
+    nohup "${PYTHON_BIN}" -m animat.simulator \
+        > "${BODY_SIM_LOG}" 2>&1 < /dev/null &
+    sleep 2
+    if body_sim_running; then
+        echo "[ok] body_simulator 已启动，日志 -> ${BODY_SIM_LOG}"
+    else
+        echo "[!] body_simulator 启动失败，日志末尾："
+        tail -n 20 "${BODY_SIM_LOG}" 2>/dev/null || true
+    fi
+}
+
+stop_body_sim() {
+    if ! body_sim_running; then
+        echo "[ok] body_simulator 未运行"
+        return
+    fi
+    echo "[..] 停止 body_simulator"
+    pkill -f "animat.simulator" 2>/dev/null || true
+
+    local waited=0
+    while body_sim_running && [ "${waited}" -lt 10 ]; do
+        sleep 1
+        waited=$((waited + 1))
+    done
+    if body_sim_running; then
+        pkill -9 -f "animat.simulator" 2>/dev/null || true
+        sleep 1
+    fi
+    body_sim_running && echo "[!] body_simulator 仍未停止" || echo "[ok] body_simulator 已停止"
+}
+
 start_webui() {
     if [ "${ANIMAT_NO_WEBUI:-0}" = "1" ]; then
         echo "[ok] 已跳过 webui (ANIMAT_NO_WEBUI=1)"
@@ -226,13 +276,14 @@ show_status() {
     port_listening 6379 && echo "redis (6379):     监听中" || echo "redis (6379):     未监听"
     animat_running && echo "animat:          运行中" || echo "animat:          未运行"
     env_sim_running && echo "env_simulator:   运行中" || echo "env_simulator:   未运行"
+    body_sim_running && echo "body_simulator:  运行中" || echo "body_simulator:  未运行"
     webui_running && echo "webui:           运行中 (端口 ${WEBUI_PORT})" || echo "webui:           未运行"
 }
 
 case "${1:-start}" in
-    start)   start_mosquitto; start_redis; start_animat; start_env_sim; start_webui; echo "--- 完成 ---" ;;
-    stop)    stop_animat; stop_env_sim; stop_webui ;;
-    restart) stop_animat; stop_env_sim; stop_webui; start_mosquitto; start_redis; start_animat; start_env_sim; start_webui; echo "--- 完成 ---" ;;
+    start)   start_mosquitto; start_redis; start_animat; start_env_sim; start_body_sim; start_webui; echo "--- 完成 ---" ;;
+    stop)    stop_animat; stop_env_sim; stop_body_sim; stop_webui ;;
+    restart) stop_animat; stop_env_sim; stop_body_sim; stop_webui; start_mosquitto; start_redis; start_animat; start_env_sim; start_body_sim; start_webui; echo "--- 完成 ---" ;;
     status)  show_status ;;
     *) echo "用法: $0 {start|stop|restart|status}"; exit 1 ;;
 esac
