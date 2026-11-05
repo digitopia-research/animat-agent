@@ -269,6 +269,12 @@ class StreamCortex:
         self._tool_result_times: list[float] = []
         # 上下文溢出后的退避截止时间，避免失败重试把日志刷屏
         self._context_fail_cooldown: float = 0.0
+        # 最近一次成功走完 LLM 调用的时刻。看门狗据此判断意识流是否停滞，
+        # 与 _last_response_at 不同：那个记的是"对外说过话"，这里记的是
+        # "脑子还在转"，自言自语和沉默期都不会让这个值停住。
+        self._last_alive_at: float = 0.0
+        # 停滞告警的抑制标记，避免卡死期间每个心跳周期都刷一条 WARNING
+        self._stall_warned: bool = False
 
         # 初始化工具（全部通过 MQTT 发布，执行器订阅后执行）
         if tools_enabled():
@@ -310,6 +316,7 @@ class StreamCortex:
 
         self._running = True
         self._start_time = time.time()
+        self._last_alive_at = time.time()   # 启动即视为存活，给首轮推理留出窗口
         logger.info("═══ StreamCortex consciousness stream started ═══")
         
         while self._running:
@@ -432,6 +439,11 @@ class StreamCortex:
             return 5.0
         think_ms = (time.time() - think_t0) * 1000
 
+        # 看门狗依据：只要 LLM 还能返回（哪怕返回空），就说明意识流活着。
+        # 放在 thought is None 判断之前，因为"模型这轮没说话"与"卡死"是
+        # 两回事，前者不应触发停滞告警。
+        self._last_alive_at = time.time()
+
         if thought is None:
             return 5.0
 
@@ -548,6 +560,31 @@ class StreamCortex:
         # 这里只把本轮的间隔需求交回去。
         return wait_sec
 
+    # ── 阻塞式推理的线程化封装 ────────────────────────────────
+    # llama.cpp 的 create_chat_completion 是同步阻塞调用，耗时可达数秒到
+    # 十几秒。直接在 async def 里调用会堵死整个事件循环，导致心跳停摆、
+    # MQTT 消息全部堆积、看门狗也一起失联——实测表现为进程 57% CPU、
+    # GPU 0%、日志静默但进程还在。所有推理一律经这两个方法丢进线程池。
+
+    async def _llm_complete(self, **kwargs) -> dict:
+        """阻塞式 complete 的异步封装。"""
+        return await asyncio.to_thread(self.llm.complete, **kwargs)
+
+    def _consume_stream_think(self, kwargs: dict) -> tuple[str, list[dict]]:
+        """消费 stream_think 生成器直到结束，返回 (累积正文, tool_calls)。
+
+        作为同步函数交给 asyncio.to_thread 执行；生成器本身是同步的，
+        在线程里迭代不会影响事件循环。
+        """
+        accumulated, collected = "", []
+        for chunk in self.llm.stream_think(**kwargs):
+            accumulated = chunk.accumulated_text
+            if chunk.tool_calls:
+                collected = chunk.tool_calls
+            if chunk.is_finished:
+                break
+        return accumulated, collected
+
     async def _think_spontaneous(self, system_prompt: str) -> Optional[Thought]:
         """产生自发思维"""
         # 获取最近记忆
@@ -591,21 +628,19 @@ class StreamCortex:
                 else None
             ) or None
 
-            for stream_thought in self.llm.stream_think(
-                system_prompt=system_prompt,
-                context_memories=recent_memories,
-                sensor_context=sensor_context,  # ← Phase 3: 原始传感器数据
-                max_tokens=self.MAX_THINK_TOKENS,
-                logit_bias=logit_bias,           # ← Phase 2: 注意力调制
-                conversation_context=recent_conv,
-                tools=self._enabled_tools(),
-                tool_results=self._current_tool_results() or None,
-            ):
-                accumulated = stream_thought.accumulated_text
-                if stream_thought.tool_calls:
-                    collected_calls = stream_thought.tool_calls
-                if stream_thought.is_finished:
-                    break
+            accumulated, collected_calls = await asyncio.to_thread(
+                self._consume_stream_think,
+                dict(
+                    system_prompt=system_prompt,
+                    context_memories=recent_memories,
+                    sensor_context=sensor_context,   # ← Phase 3: 原始传感器数据
+                    max_tokens=self.MAX_THINK_TOKENS,
+                    logit_bias=logit_bias,           # ← Phase 2: 注意力调制
+                    conversation_context=recent_conv,
+                    tools=self._enabled_tools(),
+                    tool_results=self._current_tool_results() or None,
+                ),
+            )
 
         except Exception as e:
             if "exceed context window" in str(e) or "context" in str(e).lower():
@@ -614,17 +649,17 @@ class StreamCortex:
                 logger.warning("上下文溢出，精简后重试: %s", e)
                 self._tool_results.clear()
                 try:
-                    for stream_thought in self.llm.stream_think(
-                        system_prompt=system_prompt,
-                        context_memories=[],
-                        sensor_context=sensor_context[:200] if sensor_context else "",
-                        max_tokens=self.MAX_THINK_TOKENS,
-                        conversation_context=None,
-                        tools=None,
-                    ):
-                        accumulated = stream_thought.accumulated_text
-                        if stream_thought.is_finished:
-                            break
+                    accumulated, _ = await asyncio.to_thread(
+                        self._consume_stream_think,
+                        dict(
+                            system_prompt=system_prompt,
+                            context_memories=[],
+                            sensor_context=sensor_context[:200] if sensor_context else "",
+                            max_tokens=self.MAX_THINK_TOKENS,
+                            conversation_context=None,
+                            tools=None,
+                        ),
+                    )
                 except Exception as e2:
                     logger.error("精简重试仍失败: %s", e2)
                     # 退避：让循环慢下来，不要每秒刷一次错误
@@ -703,7 +738,7 @@ class StreamCortex:
 
         tool_calls: list[dict] = []
         try:
-            response = self.llm.complete(
+            response = await self._llm_complete(
                 messages=messages,
                 max_tokens=self.MAX_REPLY_TOKENS,
                 tools=self._enabled_tools(),
@@ -732,7 +767,7 @@ class StreamCortex:
                 ),
             })
             try:
-                forced = self.llm.complete(
+                forced = await self._llm_complete(
                     messages=messages,
                     max_tokens=self.MAX_REPLY_TOKENS,
                     tools=self._enabled_tools(),
@@ -763,7 +798,7 @@ class StreamCortex:
             })
             retry_t0 = time.time()
             try:
-                retry = self.llm.complete(
+                retry = await self._llm_complete(
                     messages=messages,
                     max_tokens=self.MAX_REPLY_TOKENS,
                 )
@@ -808,7 +843,7 @@ class StreamCortex:
                 "若没有可记忆的事实，输出 {}. 不要输出其他内容。\n\n"
                 f"句子：{text}"
             )
-            resp = self.llm.complete(
+            resp = await self._llm_complete(
                 messages=[{"role": "system", "content": prompt}],
                 max_tokens=80,
             )

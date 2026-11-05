@@ -63,6 +63,8 @@ class AnimatBrain:
 
         self._running = False
         self._tick_count = 0
+        # 意识流看门狗状态（见 _check_cortex_stall）
+        self._cortex_stalled = False
 
     async def boot(self):
         """启动 Animat 大脑 v2"""
@@ -161,6 +163,12 @@ class AnimatBrain:
         """
         logger.info("Heartbeat loop v2 started")
         while self._running:
+            # 意识流看门狗：LLM 调用是阻塞的，一旦卡住，进程看起来还活着
+            # （CPU 在烧、显存占着）却不再产生任何思维，从外部完全无法区分
+            # "安静地思考"和"已经死了"。这里用推理完成时间戳做判断，
+            # 超过阈值就明确告警，并写进 state 让监控台能显示出来。
+            self._check_cortex_stall()
+
             # 状态广播属于"尽力而为"的遥测：任何一步失败都不应终止整个
             # 心跳循环。此前没有 try/except，一次异常就让 state 永久停播，
             # 前端表现为"左侧一直未连接，右侧独白照常刷新"。
@@ -208,12 +216,46 @@ class AnimatBrain:
                     "thoughts_per_min": stats["thoughts_per_min"],
                     "conversation_history": recent_conv,
                     "self_info": self_info,
+                    # 意识流健康度：网页可据此显示"思考中 Ns"或"停滞"
+                    "cortex": {
+                        "alive": not self._cortex_stalled,
+                        "since_last_think_sec": round(
+                            time.time() - self.stream_cortex._last_alive_at, 1
+                        ),
+                    },
                     "timestamp": time.time(),
                 })
             except Exception:
                 logger.warning("heartbeat broadcast failed (will retry)", exc_info=True)
 
             await asyncio.sleep(1.0)
+
+    # ── 意识流看门狗 ──
+    CORTEX_STALL_SEC = 120.0     # 超过这个时长没有完成任何推理，视为停滞
+
+    def _check_cortex_stall(self):
+        """检查意识流是否停滞。
+
+        阈值取 120 秒：正常一轮自发思维最长约 20-30 秒（512 token 预算 +
+        排队），留出四倍余量，避免把"正在写一段长独白"误判成卡死。
+        卡死期间只告警一次，恢复后再重置，防止每秒刷屏。
+        """
+        last = getattr(self.stream_cortex, "_last_alive_at", 0.0)
+        if not last:
+            return
+
+        idle = time.time() - last
+        stalled = idle > self.CORTEX_STALL_SEC
+
+        if stalled and not self._cortex_stalled:
+            logger.error(
+                "⚠ 意识流停滞: 已有 %.0fs 未完成任何推理。进程可能卡在 LLM 调用中。",
+                idle,
+            )
+            self._cortex_stalled = True
+        elif not stalled and self._cortex_stalled:
+            logger.info("意识流已恢复（停滞 %.0fs 后重新产出）", idle)
+            self._cortex_stalled = False
 
     # ── 传感器同步 ──
     async def _sync_sensor_driven_vitals(self):
