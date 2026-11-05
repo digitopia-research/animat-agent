@@ -44,6 +44,17 @@ class Topic:
     # ── 反射弧（感知层直通效应器，绕过大脑）──
     REFLEX          = "animat/reflex"              # 反射动作
 
+    # ── 环境世界模拟器的远程控制 ──
+    # start_server.sh 以 nohup 方式拉起 env_simulator，stdin 接 /dev/null，
+    # 原有的 /person /quiet /scene 等交互命令在后台模式下无法使用。
+    # 因此把这些命令改走 MQTT：任意客户端（webui/world.html）发布
+    # {"cmd": "person"} 这样的载荷即可，模拟器执行后回 ACK。
+    # 这与"刺激"通路是两回事：
+    #   animat/sensor/*    刺激，模拟器是生产者，Animat 是消费者
+    #   animat/env/*       控制与遥测，模拟器是消费者/生产者，Animat 不订阅
+    ENV_CONTROL     = "animat/env/control"         # 下发命令给 env_simulator
+    ENV_STATUS      = "animat/env/status"          # env_simulator 的状态与回执
+
 
 # ─────────────────── 内稳态指标 ───────────────────
 class HomeostasisConfig:

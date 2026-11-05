@@ -112,8 +112,9 @@ start_env_sim() {
     fi
     cd "${PROJECT_DIR}"
     echo "[..] 启动 env_simulator（环境世界）"
-    # stdin 接 /dev/null：交互命令不可用，但事件注入与内感上报照常
-    # 需要交互命令时，另开终端手动运行 python -m animat.env_simulator
+    # 纯后端进程，不读 stdin、无终端命令。手动注入事件请打开
+    #   http://<本机IP>:${WEBUI_PORT}/world.html
+    # 该页面通过 MQTT 话题 animat/env/control 下发命令。
     nohup "${PYTHON_BIN}" -m animat.env_simulator \
         > "${ENV_SIM_LOG}" 2>&1 < /dev/null &
     sleep 3

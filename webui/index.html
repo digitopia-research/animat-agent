@@ -154,6 +154,17 @@
     border: 1px solid var(--line); letter-spacing: 1.1px; text-transform: uppercase;
     white-space: nowrap;
   }
+
+  /* 顶栏跳转链接（世界模拟器控制台） */
+  .link-btn {
+    text-decoration: none; font-size: 10px; letter-spacing: 1.2px; text-transform: uppercase;
+    color: var(--txt-dim); border: 1px solid var(--line);
+    padding: 6px 12px; border-radius: 2px; transition: .18s; white-space: nowrap;
+  }
+  .link-btn:hover {
+    color: var(--accent-2); border-color: var(--accent-2);
+    background: rgba(34, 211, 238, .08);
+  }
   .dot {
     width: 6px; height: 6px; border-radius: 50%; background: var(--red);
     transition: .3s;
@@ -616,6 +627,8 @@
   </div>
   <input id="broker" value="ws://192.168.1.6:8083/mqtt" title="MQTT WebSocket 地址">
   <button id="connectBtn">Connect</button>
+  <!-- 世界模拟器是独立的写入型控制台，本页只读，故放在这里做跳转而不是内嵌 -->
+  <a class="link-btn" id="worldLink" href="world.html" title="手动注入环境事件">世界模拟器 ↗</a>
   <div class="modes">
     <span class="lbl">Mode</span>
     <button class="mode-btn active" data-m="auto" title="跟随系统">Auto</button>

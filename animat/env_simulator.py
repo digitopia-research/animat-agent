@@ -20,16 +20,15 @@ Animat 环境世界模拟器 — 持续向 Animat 注入有语义的外界刺激
   uv run python -m animat.env_simulator
   ANIMAT_ENV_SEED=42 uv run python -m animat.env_simulator   # 固定随机种子（可复现）
 
-交互命令:
-  /help     显示帮助
-  /status   当前环境状态
-  /person   有人经过
-  /touch    被轻轻碰了一下
-  /light    光线突变
-  /noise    环境异响
-  /quiet    全部事件暂停
-  /lively   恢复事件
-  /scene N  切换场景密度: quiet / normal / lively
+控制方式（仅 MQTT，无终端交互）:
+  本进程是后端服务，不读 stdin、不提供命令行。
+  手动干预一律走 MQTT，浏览器打开 webui/world.html 即可：
+    发布 animat/env/control  {"cmd": "person"}
+    发布 animat/env/control  {"cmd": "scene", "arg": "lively"}
+    发布 animat/env/control  {"cmd": "status"}
+  可用 cmd: status / person / leave / touch / bump / light / noise
+            / quiet / lively / scene(带 arg) / help
+  执行结果与当前状态发布在 animat/env/status。
 """
 
 from __future__ import annotations
@@ -170,6 +169,9 @@ class EnvironmentSimulator:
         self._circadian = circadian_now()
         self._last_event = "（无）"
         self._event_count = 0
+
+    # 本进程只做后端服务：不读 stdin、不提供终端命令行。
+    # 所有手动干预走 MQTT（animat/env/control），见模块 docstring。
 
     # ── 事件工厂 ──
     def _make_person_approach(self) -> EnvEvent:
@@ -398,61 +400,173 @@ class EnvironmentSimulator:
                 # 每产生一次思维就计入负载
                 self._load = min(1.0, self._load + 0.12)
 
-    async def _command_loop(self) -> None:
-        """交互命令。"""
-        loop = asyncio.get_running_loop()
-        while self._running:
-            try:
-                line = await loop.run_in_executor(None, input, "env> ")
-            except (EOFError, KeyboardInterrupt):
-                break
-            if not await self._handle_command(line.strip()):
-                break
+    async def _handle_command(self, line: str, reply: Optional[Callable[[str], None]] = None) -> bool:
+        """执行一条命令，把结果交给 reply 回调（默认打印）。
 
-    async def _handle_command(self, line: str) -> bool:
+        命令逻辑本身与传输方式无关：MQTT 入口传一个 list.append 收集回执文字。
+        """
+        emit = reply or print
+
         if not line:
             return True
         cmd, _, arg = line.partition(" ")
+        cmd = cmd.lstrip("/").lower()
+        arg = arg.strip()
 
-        if cmd in ("/quit", "/exit", "/q"):
+        if cmd in ("quit", "exit", "q"):
             self._running = False
             return False
-        if cmd == "/help":
-            print(__doc__)
-        elif cmd == "/status":
-            print(f"  场景    : {SCENES[self._scene]['label']}")
-            print(f"  事件开关: {'开' if self._events_enabled else '关'}")
-            print(f"  环境    : {self._circadian.describe()}")
-            print(f"  内感    : 电量{self._battery:.1f}% 体温{self._temperature:.1f}°C "
-                  f"倾角{self._tilt:.1f}° 负载{self._load:.2f}")
-            print(f"  已发事件: {self._event_count} 次，最近: {self._last_event}")
-        elif cmd == "/person":
+        if cmd == "help":
+            # 进程没有终端，help 只是给 MQTT 客户端的一份能力清单，
+            # 因此不要再把整段模块 docstring 当作"帮助"发出去。
+            emit("可用命令: " + " / ".join([
+                "status", "person", "leave", "touch", "bump",
+                "light", "noise", "quiet", "lively", "scene <quiet|normal|lively>",
+            ]))
+        elif cmd == "status":
+            emit(self._status_text())
+        elif cmd == "person":
             await self._emit_event(self._make_person_approach())
-        elif cmd == "/leave":
+            emit(f"已注入：{self._last_event}")
+        elif cmd == "leave":
             await self._emit_event(self._make_person_leave())
-        elif cmd == "/touch":
+            emit(f"已注入：{self._last_event}")
+        elif cmd == "touch":
             await self._emit_event(self._make_gentle_touch())
-        elif cmd == "/light":
+            emit(f"已注入：{self._last_event}")
+        elif cmd == "light":
             await self._emit_event(self._make_light_shift())
-        elif cmd == "/noise":
+            emit(f"已注入：{self._last_event}")
+        elif cmd == "noise":
             await self._emit_event(self._make_ambient_noise())
-        elif cmd == "/bump":
+            emit(f"已注入：{self._last_event}")
+        elif cmd == "bump":
             await self._emit_event(self._make_gentle_bump())
-        elif cmd == "/quiet":
+            emit(f"已注入：{self._last_event}")
+        elif cmd == "quiet":
             self._events_enabled = False
-            print("  事件已暂停（内感仍在上报）")
-        elif cmd == "/lively":
+            emit("事件已暂停（内感仍在上报）")
+        elif cmd == "lively":
             self._events_enabled = True
-            print("  事件已恢复")
-        elif cmd == "/scene":
+            emit("事件已恢复")
+        elif cmd == "scene":
             if arg in SCENES:
                 self._scene = arg
-                print(f"  场景 -> {SCENES[arg]['label']}")
+                emit(f"场景 -> {SCENES[arg]['label']}")
             else:
-                print(f"  可用场景: {', '.join(SCENES)}")
+                emit(f"可用场景: {', '.join(SCENES)}")
         else:
-            print(f"  未知命令: {cmd}（/help 查看）")
+            emit(f"未知命令: {cmd}（help 查看）")
         return True
+
+    # ── 状态快照 ──
+    def _status_dict(self) -> dict:
+        """供 MQTT / 网页读取的完整状态。"""
+        lo, hi = SCENES[self._scene]["event_gap"]
+        return {
+            "type": "status",
+            "scene": self._scene,
+            "scene_label": SCENES[self._scene]["label"],
+            "scenes": {k: v["label"] for k, v in SCENES.items()},
+            "event_gap": [lo, hi],
+            "events_enabled": self._events_enabled,
+            "phase": self._circadian.phase,
+            "ambient_light": self._circadian.ambient_light,
+            "ambient_db": self._circadian.ambient_db,
+            "activity": self._circadian.activity,
+            "battery_pct": round(self._battery, 1),
+            "temperature": round(self._temperature, 1),
+            "imu_tilt_deg": round(self._tilt, 1),
+            "charging": self._charging,
+            "load": round(self._load, 2),
+            "event_count": self._event_count,
+            "last_event": self._last_event,
+            "ts": time.time(),
+        }
+
+    def _status_text(self) -> str:
+        lo, hi = SCENES[self._scene]["event_gap"]
+        return (
+            f"  场景    : {SCENES[self._scene]['label']}（间隔 {lo}-{hi}s）\n"
+            f"  事件开关: {'开' if self._events_enabled else '关'}\n"
+            f"  环境    : {self._circadian.describe()}\n"
+            f"  内感    : 电量{self._battery:.1f}% 体温{self._temperature:.1f}°C "
+            f"倾角{self._tilt:.1f}° 负载{self._load:.2f}\n"
+            f"  已发事件: {self._event_count} 次，最近: {self._last_event}"
+        )
+
+    async def _publish_status(self) -> None:
+        await self._publish(Topic.ENV_STATUS, self._status_dict(), qos=0)
+
+    # ── MQTT 控制通道 ──
+    async def _listen_control(self, client: aiomqtt.Client) -> None:
+        """接收远程命令并回执。
+
+        与终端命令行共用 _handle_command：只有输出通路不同。
+        回执里带 ok/msg 两个字段，网页可以据此给出即时反馈，
+        不必等下一次状态轮询。
+        """
+        async for message in client.messages:
+            topic = str(message.topic)
+            if topic != Topic.ENV_CONTROL:
+                continue
+            # 无条件记一行：排查"按钮没反应"时，第一个要确认的就是
+            # 命令究竟有没有到达模拟器。放在解析之前，连载荷损坏也能看见。
+            raw = message.payload.decode("utf-8", errors="replace")
+            logger.info("📥 收到控制命令: %s", raw[:120])
+            try:
+                payload = json.loads(raw)
+            except json.JSONDecodeError:
+                logger.warning("忽略非法控制载荷（不是合法 JSON）: %r", raw[:80])
+                continue
+            if not isinstance(payload, dict):
+                logger.warning("忽略非法控制载荷（应为对象）: %r", raw[:80])
+                continue
+
+            cmd = str(payload.get("cmd", "")).strip()
+            arg = payload.get("arg", "")
+            if not cmd:
+                logger.warning("控制载荷缺少 cmd 字段: %r", raw[:80])
+                continue
+
+            lines: list[str] = []
+            try:
+                keep = await self._handle_command(
+                    f"{cmd} {arg}".strip(), reply=lines.append
+                )
+            except Exception as e:
+                logger.warning("命令执行失败 %s: %s", cmd, e)
+                await self._publish(Topic.ENV_STATUS, {
+                    "type": "ack", "cmd": cmd, "ok": False,
+                    "msg": f"执行失败: {e}", "ts": time.time(),
+                }, qos=0)
+                continue
+
+            logger.info("🌍 远程命令已执行: %s -> %s", cmd, " / ".join(lines) or "ok")
+            await self._publish(Topic.ENV_STATUS, {
+                "type": "ack",
+                "cmd": cmd,
+                "ok": True,
+                "msg": " / ".join(lines) if lines else "ok",
+                "ts": time.time(),
+            }, qos=0)
+            await self._publish_status()
+
+            if not keep:            # quit / exit
+                self._running = False
+                return
+
+    async def _status_loop(self) -> None:
+        """周期性广播世界状态，供网页实时刷新。
+
+        3 秒一次：足够让按钮反馈看起来即时，又不会给 broker 添负担。
+        """
+        while self._running:
+            try:
+                await self._publish_status()
+            except Exception as e:
+                logger.debug("状态广播失败: %s", e)
+            await asyncio.sleep(3)
 
     async def run(self) -> None:
         async with aiomqtt.Client(
@@ -462,17 +576,28 @@ class EnvironmentSimulator:
             self._running = True
             logger.info("🌍 环境世界启动 — %s", SCENES[self._scene]["label"])
             logger.info("   当前环境: %s", self._circadian.describe())
-            logger.info("   输入 /help 查看命令，/quiet 暂停事件")
+            logger.info("   控制通道: %s  （手动注入请用 webui/world.html）",
+                        Topic.ENV_CONTROL)
 
             await client.subscribe(Topic.MOTOR, qos=1)
             await client.subscribe(Topic.CORTEX_THOUGHT, qos=0)
+            await client.subscribe(Topic.ENV_CONTROL, qos=1)
 
-            await asyncio.gather(
-                self._interoception_loop(),
-                self._event_loop(),
-                self._listen_motor(client),
-                self._command_loop(),
-            )
+            # 启动即广播一次，网页一连上就能看到状态，不必等 3 秒
+            await self._publish_status()
+
+            tasks = [
+                asyncio.create_task(self._interoception_loop()),
+                asyncio.create_task(self._event_loop()),
+                asyncio.create_task(self._status_loop()),
+                asyncio.create_task(self._listen_control(client)),
+            ]
+
+            try:
+                await asyncio.gather(*tasks)
+            finally:
+                for t in tasks:
+                    t.cancel()
 
 
 def main() -> None:
