@@ -128,6 +128,15 @@ class ToolSpec:
     # 频控：同一工具两次调用之间的最小间隔（秒）
     cooldown_sec: float = 3.0
 
+    # 是否属于"对外可见的动作"（说话、走路、表情、手势）。
+    # 这类工具的调用，本身就是模型这一轮在外部世界留下的痕迹；
+    # 而纯查询类工具（web_search / look_around）不产生可被看见的行为。
+    # 用途见 StreamCortex：调用了可见动作的那一轮，模型写的正文
+    # （多半是"我想走过去看看"这类过程叙述）可以作为旁白播出去，
+    # 不必因为"没说 speak"就整段丢弃。这是展示层的事情，
+    # 不影响"说什么"由模型自己通过 speak 决定的链路。
+    display: bool = False
+
     def to_openai_schema(self) -> dict:
         """转成 OpenAI tools 格式，直接喂给 llama-cpp-python。"""
         properties = {k: v.to_json_schema() for k, v in self.params.items()}

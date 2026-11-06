@@ -62,14 +62,15 @@ class Thought:
     trigger: str = "spontaneous"     # 触发源: spontaneous / drive / external / survival
 
     # 表达类型: soliloquy(自言自语) / proactive(主动说) / response(回应)
+    # 仅用于观测标注，不参与任何拦截。
     utterance_type: str = "soliloquy"
 
-    # 行为意图，由 LLM 生成时显式给出（none/speak/move/expression）
-    # 取代早期基于中文关键词猜测的硬编码分类。
-    intent: str = "none"
-
     # 模型请求的工具调用（OpenAI 格式的 tool_calls 列表）。
-    # 工具是"行动"，与"说不说"解耦：一条独白也可以顺手调个 LED。
+    #
+    # 这是 Thought 里唯一表示"要做什么"的字段。以前还有一个 intent 字段
+    # 承载 <intent> 标签（none/speak/expression），与 tool_calls 并行存在；
+    # 两套并行意味着同一个"我想做点什么"有两种写法，而模型必然挑简单的
+    # 那个——结果是标签被填满、工具从不被调用。现在只剩这一种。
     tool_calls: list[dict] = field(default_factory=list)
     
     # 产生方式
@@ -130,18 +131,17 @@ class ActionGate:
       话密就削。这是权宜之计，不是终局方案。
     """
 
-    # 合法动作类型（由 LLM 在生成思维时显式选择）
-    VALID_ACTIONS = frozenset({"none", "speak", "move", "expression"})
-    # 语义意图 → 动作类型。soliloquy/call 都是"开口"，区别交由上层按意图
-    # 决定是否对外广播（见 StreamCortex 门控）。
-    INTENT_TO_ACTION = {
-        "none": "none",
-        "soliloquy": "speak",
-        "call": "speak",
-        "speak": "speak",
-        "move": "move",
-        "expression": "expression",
-    }
+    # ActionGate 已不再参与行为决定，仅保留在代码里作为"思维评分"工具。
+    #
+    # 它原来的职责是：从 <intent> 标签推断动作类型，再用相关性评分
+    # / 字符相似度 / 最小间隔决定这条思维能不能真的发生。整套逻辑的
+    # 前提是"系统看得懂这句话该不该说"——但标签只说了"想说"，
+    # 没说"想说什么"，于是只能事后堵：2704 次抑制对 1719 次输出。
+    #
+    # 现在"说不说"由模型调不调 speak 决定，"说什么"在参数里。
+    # 系统不再替模型做这个判断，也就没有可映射的意图表了。
+    VALID_ACTIONS = frozenset({"none", "speak"})
+    INTENT_TO_ACTION: dict[str, str] = {}
 
     # 配置
     BASE_THRESHOLD = 0.7              # 基础阈值
@@ -380,14 +380,12 @@ class ActionGate:
         return overlap / min(len(ga), len(gb))
 
     def _classify_action(self, thought: Thought) -> str:
-        """确定思维对应的动作类型。
+        """从思维推断它请求了哪些动作。
 
-        意图由 LLM 生成思维时显式给出（Thought.intent），这里只做映射与兜底，
-        不再用中文关键词猜测——关键词表对同义改写、跨语言输出都会失效。
+        不再映射意图标签（那个字段已删除），直接看 tool_calls：
+        模型要用什么工具，在这里就是透明的，不需要翻译。
         """
-        intent = (thought.intent or "").strip().lower()
-        # 未知/缺失意图 → 视为纯想法，不转化为外部行为
-        return self.INTENT_TO_ACTION.get(intent, "none")
+        return "speak" if thought.tool_calls else "none"
 
     def _build_reason(
         self, thought: Thought, score: float, threshold: float,

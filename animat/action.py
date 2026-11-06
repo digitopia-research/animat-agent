@@ -13,7 +13,7 @@
 import logging
 from dataclasses import dataclass
 
-from animat.config import Topic, RedisKeys, SharedConstants
+from animat.config import Topic
 from animat.nervous import NervousSystem
 from animat.memory import MemoryStore
 from animat.homeostasis import EmotionCircuit
@@ -40,86 +40,17 @@ class ActionNode:
     priority: int = 0    # 优先级
 
 
-# ─────────────── 意图→动作映射 ───────────────
-# 每个意图对应一个动作序列模板
-INTENT_ACTION_TREES: dict[str, list[ActionNode]] = {
-    "seek_charge": [
-        ActionNode(command=MotorCommand.EXPRESSION, params={"face": "worried"}, delay_ms=0),
-        ActionNode(command=MotorCommand.LED, params={"color": "yellow", "pattern": "pulse"}, delay_ms=0),
-        ActionNode(command=MotorCommand.MOVE, params={"direction": SharedConstants.DIRECTION_CHARGER, "speed": 0.5}),
-    ],
-    "flee": [
-        ActionNode(command=MotorCommand.EXPRESSION, params={"face": "scared"}, delay_ms=0),
-        ActionNode(command=MotorCommand.LED, params={"color": "red", "pattern": "flash"}, delay_ms=0),
-        ActionNode(command=MotorCommand.MOVE, params={"direction": "away", "speed": 1.0}),
-    ],
-    "warn": [
-        ActionNode(command=MotorCommand.EXPRESSION, params={"face": "angry"}, delay_ms=0),
-        ActionNode(command=MotorCommand.LED, params={"color": "red", "pattern": "solid"}, delay_ms=0),
-        ActionNode(command=MotorCommand.GESTURE, params={"type": "wave_off"}, delay_ms=200),
-    ],
-    "self_protect": [
-        ActionNode(command=MotorCommand.EXPRESSION, params={"face": "determined"}, delay_ms=0),
-        ActionNode(command=MotorCommand.GESTURE, params={"type": "curl"}, delay_ms=0),
-        ActionNode(command=MotorCommand.LED, params={"color": "orange", "pattern": "solid"}, delay_ms=0),
-    ],
-    "seek_company": [
-        ActionNode(command=MotorCommand.EXPRESSION, params={"face": "sad"}, delay_ms=0),
-        ActionNode(command=MotorCommand.LED, params={"color": "blue", "pattern": "pulse"}, delay_ms=0),
-        ActionNode(command=MotorCommand.MOVE, params={"direction": "people", "speed": 0.3}),
-    ],
-    # 探索/走动。这个 key 必须存在：模型输出的 <intent>move</intent>
-    # 就是查这张表，查不到会 fallback 到 idle（什么都不做），
-    # 表现为"心里想四处看看，身体一动不动"。
-    #
-    # 步速取 0.4 而不是 1.0：这是漫游不是逃跑，太快会让画面像在抽搐。
-    # 先给一个轻微的表情和灯光，让动作看上去有起因，而不是突然平移。
-    "move": [
-        ActionNode(command=MotorCommand.EXPRESSION, params={"face": "curious"}, delay_ms=0),
-        ActionNode(command=MotorCommand.LED, params={"color": "cyan", "pattern": "gentle_pulse"}, delay_ms=0),
-        ActionNode(command=MotorCommand.MOVE, params={"direction": "forward", "speed": 0.4}, delay_ms=150),
-    ],
-    "express_need": [
-        ActionNode(command=MotorCommand.EXPRESSION, params={"face": "hopeful"}, delay_ms=0),
-        ActionNode(command=MotorCommand.LED, params={"color": "warm_white", "pattern": "gentle_pulse"}, delay_ms=0),
-    ],
-    "comfort": [
-        ActionNode(command=MotorCommand.EXPRESSION, params={"face": "gentle"}, delay_ms=0),
-        ActionNode(command=MotorCommand.LED, params={"color": "warm_white", "pattern": "steady"}, delay_ms=0),
-        ActionNode(command=MotorCommand.GESTURE, params={"type": "reach_out"}, delay_ms=300),
-    ],
-    "ask_help": [
-        ActionNode(command=MotorCommand.EXPRESSION, params={"face": "uncertain"}, delay_ms=0),
-        ActionNode(command=MotorCommand.LED, params={"color": "yellow", "pattern": "slow_blink"}, delay_ms=0),
-        ActionNode(command=MotorCommand.GESTURE, params={"type": "raise_hand"}, delay_ms=200),
-    ],
-    "learn": [
-        ActionNode(command=MotorCommand.EXPRESSION, params={"face": "curious"}, delay_ms=0),
-        ActionNode(command=MotorCommand.LED, params={"color": "green", "pattern": "pulse"}, delay_ms=0),
-    ],
-    "explore": [
-        ActionNode(command=MotorCommand.EXPRESSION, params={"face": "excited"}, delay_ms=0),
-        ActionNode(command=MotorCommand.LED, params={"color": "green", "pattern": "wave"}, delay_ms=0),
-        ActionNode(command=MotorCommand.MOVE, params={"direction": "random", "speed": 0.4}),
-    ],
-    "play": [
-        ActionNode(command=MotorCommand.EXPRESSION, params={"face": "happy"}, delay_ms=0),
-        ActionNode(command=MotorCommand.LED, params={"color": "rainbow", "pattern": "sparkle"}, delay_ms=0),
-        ActionNode(command=MotorCommand.GESTURE, params={"type": "bounce"}, delay_ms=0),
-    ],
-    "chat": [
-        ActionNode(command=MotorCommand.EXPRESSION, params={"face": "friendly"}, delay_ms=0),
-        ActionNode(command=MotorCommand.LED, params={"color": "warm_white", "pattern": "steady"}, delay_ms=0),
-    ],
-    "rest": [
-        ActionNode(command=MotorCommand.EXPRESSION, params={"face": "sleepy"}, delay_ms=0),
-        ActionNode(command=MotorCommand.LED, params={"color": "dim_blue", "pattern": "slow_breath"}, delay_ms=0),
-        ActionNode(command=MotorCommand.MOVE, params={"direction": "home", "speed": 0.2}),
-    ],
-    "idle": [
-        ActionNode(command=MotorCommand.LED, params={"color": "soft_white", "pattern": "slow_breath"}, delay_ms=0),
-    ],
-}
+# INTENT_ACTION_TREES 已经整张删除。
+#
+# 它把十几种"意图"映射到写死的动作序列（intent=explore → 随机方向走一米）。
+# 那张表真正在做的事，是把模型的表达能力压缩到十来棵预设的树里：
+# 它永远无法表达"我想去书架"，只能选一棵最接近的树，然后由系统
+# 替它播放一套固定动作。配上 <intent> 标签后问题更明显——
+# 模型只学会了填标签，动作本身和它的想法是脱钩的。
+#
+# 现在动作全部由工具调用直接表达，参数就是模型的原话：
+#   move_to(place="书架") / express(emotion="sad") / speak(text="...")
+# 不需要中间层翻译，也就不需要这张表。
 
 # 情感修饰器: 根据当前情感调整动作参数(如语速、音量)
 EMOTION_MODIFIERS = {
@@ -152,48 +83,56 @@ class ActionExecutor:
 
     # ── 意识输出处理 ──
     async def _on_cortex_output(self, topic: str, payload: dict):
+        """处理一次"说出去了"的通知。
+
+        这里曾经是 LLM 输出的主要翻译层：拿 <intent> 标签去
+        INTENT_ACTION_TREES 里查一棵写死的动作树，然后逐条发 motor 指令。
+        那套设计有两个问题，现在都已不存在：
+
+          1. 动作树是写死的（intent=explore → 随机方向走一米），
+             模型无法表达"走向书架"，只能挑一棵最接近的树。
+          2. 系统替模型发声：门控放行 = 说出去，模型自己从没表达过
+             "这句话我说不说"。于是 96.6% 的思维挤在同一个标签上，
+             剩下全世界都在做抑制。
+
+        现在动作由模型的工具调用直接下发到 effector/* 与 motor 话题，
+        这里只保留两件系统该做的事：语音合成（注入情感语速音量）
+        和情景记忆。它不再决定说什么，也不再决定做什么。
         """
-        将LLM输出翻译为动作序列并执行
-        """
-        intent = payload.get("intent", "idle")
         text = payload.get("text", "")
-        action_detail = payload.get("action_detail", "")
-        utterance_type = payload.get("utterance_type")  # 可能为 None（旧字段兼容）
+        mode = payload.get("mode") or "aloud"
+        utterance_type = payload.get("utterance_type") or "proactive"
 
-        logger.info(f"Executing intent: {intent}, text: {text[:50]}")
+        logger.info(f"Cortex output ({mode}): {text[:50]}")
 
-        # 1. 语音/对话输出：仅"主动说"与"回应"对外发声并进入对话窗口；
-        #    自言自语(soliloquy)只在内心窗呈现，不对空说话、不进对话流。
-        if utterance_type != "soliloquy":
+        # 1. 语音合成。mutter 也要发——自言自语是人听得见的小声嘀咕，
+        #    只是不进对话窗口（分流在 webui 里做）。
+        #
+        # 这里是**唯一**把"文字"变成 motor/speak 的地方：无论文字来自
+        # 模型的 speak 工具，还是对话轮的正文，都汇到这一层再发声。
+        # 两个发起点会让同一句话出现两次（实测确有重复气泡），
+        # 而发声需要情感修饰，只有这一层看得到当前情感。
+        if text:
             modifier = EMOTION_MODIFIERS.get(self._current_emotion, {})
             await self.nervous.fire(Topic.MOTOR, {
                 "command": MotorCommand.SPEAK,
                 "params": {
                     "text": text,
+                    "mode": mode,
                     "rate": modifier.get("speech_rate", 1.0),
                     "volume": modifier.get("volume", 0.7),
                     "utterance_type": utterance_type,
                 },
             })
 
-        # 2. 意图对应的动作序列
-        action_tree = INTENT_ACTION_TREES.get(intent, INTENT_ACTION_TREES["idle"])
-        for node in action_tree:
-            motor_cmd = {
-                "command": node.command,
-                "params": node.params,
-                "delay_ms": node.delay_ms,
-            }
-            await self.nervous.fire(Topic.MOTOR, motor_cmd)
-
-        # 3. 存储到情景记忆
+        # 2. 存储到情景记忆
         await self.memory.store_episode(
-            summary=f"执行意图[{intent}]: {text[:50]}",
+            summary=f"[{mode}] {text[:50]}",
             content=text,
             emotion=self._current_emotion,
             category="action",
             intensity=0.3,
-            extra={"intent": intent, "action_detail": action_detail},
+            extra={"mode": mode},
         )
 
     # ── 反射弧处理 ──

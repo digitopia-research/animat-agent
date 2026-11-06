@@ -691,6 +691,7 @@
             <span>意识流</span>
             <span class="stat-val" id="stCortex">—</span>
           </div>
+          <div class="stat-row"><span>位置</span><span class="stat-val" id="stPlace">—</span></div>
           <div class="stat-row"><span>主导情绪</span><span class="stat-val" id="stEmotion">—</span></div>
           <div class="stat-row"><span>情绪强度</span><span class="stat-val" id="stEmoInt">—</span></div>
           <div class="stat-row"><span>驱力</span><span class="stat-val" id="stDrive">—</span></div>
@@ -862,12 +863,21 @@ const LED_COLORS_HEX = {
 //   电量 → 眼部与底盘辉光        LED  → 顶部灯带颜色/闪烁
 //   体温 → 灯带偏红             有人靠近 → 场景出现人形
 // ═══════════════════════════════════════════════════════════
+// 最近一次空间状态。机器人位置以它为准，不再靠前端自己累加。
+//
+// 必须声明在 initViewport 之前：那是个立即执行的 IIFE，里面的 animate()
+// 在初始化阶段就会同步跑第一帧，读到这里时若还没声明，
+// 就会报 "Cannot access 'spatialTarget' before initialization"（TDZ）。
+let spatialTarget = null;
+
 const viewport = (function initViewport() {
   const canvas = document.getElementById("webgl-canvas");
   if (!canvas || typeof THREE === "undefined") {
+    // THREE 缺失时的空实现，字段必须与正常分支一致，
+    // 否则调用方要靠 typeof 判断，容易漏。
     return { setLight() {}, setTilt() {}, setBattery() {}, setLed() {},
              setTemp() {}, setPerson() {}, setExpression() {}, setMotion() {},
-             setSpeed() {}, setCamera() {} };
+             setSpeed() {}, setCamera() {}, setModel() {}, syncProps() {} };
   }
 
   const scene = new THREE.Scene();
@@ -921,6 +931,143 @@ const viewport = (function initViewport() {
   const grid = new THREE.GridHelper(FLOOR, 40, 0x3a5a8a, 0x22344f);
   grid.position.y = 0.01;
   scene.add(grid);
+
+  // ── 房间里的物件 ──
+  // 位置来自 env_simulator 广播的空间状态，不在这里写死坐标：
+  // 模型看到的距离按同一份数据算，所以"它说走向书架"和"画面上走向书架"
+  // 是同一件事。初次渲染用一份占位数据，收到状态后被替换。
+  const propGroup = new THREE.Group();
+  scene.add(propGroup);
+
+  // 每种物件用不同几何体区分，避免一堆方块看不出是什么。
+  // 尺寸比真实物体略大：太小在俯视视角下几乎看不见。
+  function buildProp(name) {
+    const g = new THREE.Group();
+    let mesh;
+    switch (name) {
+      case "书架":
+        mesh = new THREE.Mesh(
+          new THREE.BoxGeometry(1.8, 2.2, 0.55),
+          new THREE.MeshStandardMaterial({ color: 0x6b4a2f, roughness: 0.85, metalness: 0.05 })
+        );
+        mesh.position.y = 1.1;
+        g.add(mesh);
+        // 几层隔板，让它一眼像书架
+        for (let i = 0; i < 3; i++) {
+          const s = new THREE.Mesh(
+            new THREE.BoxGeometry(1.7, 0.06, 0.5),
+            new THREE.MeshStandardMaterial({ color: 0x8a6440, roughness: 0.8 })
+          );
+          s.position.set(0, 0.5 + i * 0.6, 0);
+          g.add(s);
+        }
+        break;
+      case "沙发":
+        mesh = new THREE.Mesh(
+          new THREE.BoxGeometry(2.4, 0.75, 1.1),
+          new THREE.MeshStandardMaterial({ color: 0x4a5468, roughness: 0.92 })
+        );
+        mesh.position.y = 0.38;
+        g.add(mesh);
+        {
+          const back = new THREE.Mesh(
+            new THREE.BoxGeometry(2.4, 0.8, 0.3),
+            new THREE.MeshStandardMaterial({ color: 0x3d4657, roughness: 0.92 })
+          );
+          back.position.set(0, 0.75, -0.4);
+          g.add(back);
+        }
+        break;
+      case "工作台":
+        mesh = new THREE.Mesh(
+          new THREE.BoxGeometry(2.0, 0.9, 1.0),
+          new THREE.MeshStandardMaterial({ color: 0x596273, roughness: 0.6, metalness: 0.35 })
+        );
+        mesh.position.y = 0.45;
+        g.add(mesh);
+        break;
+      case "窗户":
+        // 窗户是墙上的开口：用半透明蓝色面片表达，站在前面能看到光
+        mesh = new THREE.Mesh(
+          new THREE.BoxGeometry(2.6, 2.0, 0.12),
+          new THREE.MeshStandardMaterial({
+            color: 0x7fb8ff, transparent: true, opacity: 0.35,
+            emissive: 0x2a4a7a, emissiveIntensity: 0.6,
+            roughness: 0.2, metalness: 0.1,
+          })
+        );
+        mesh.position.y = 1.5;
+        g.add(mesh);
+        break;
+      case "充电座":
+        mesh = new THREE.Mesh(
+          new THREE.BoxGeometry(0.9, 0.28, 0.9),
+          new THREE.MeshStandardMaterial({
+            color: 0x2b3648, roughness: 0.5, metalness: 0.6,
+            emissive: 0x1a3a5a, emissiveIntensity: 0.5,
+          })
+        );
+        mesh.position.y = 0.14;
+        g.add(mesh);
+        break;
+      default:
+        mesh = new THREE.Mesh(
+          new THREE.BoxGeometry(1, 1, 1),
+          new THREE.MeshStandardMaterial({ color: 0x66707f, roughness: 0.8 })
+        );
+        mesh.position.y = 0.5;
+        g.add(mesh);
+    }
+    return g;
+  }
+
+  // 名称标签：让人一眼知道模型说的"书架"是画面里的哪一个
+  function buildLabel(text) {
+    const c = document.createElement("canvas");
+    const ctx = c.getContext("2d");
+    c.width = 256; c.height = 64;
+    ctx.fillStyle = "rgba(10,14,20,0.72)";
+    ctx.fillRect(0, 0, c.width, c.height);
+    ctx.font = "bold 34px system-ui, sans-serif";
+    ctx.fillStyle = "#9fd8ff";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(text, c.width / 2, c.height / 2);
+    const tex = new THREE.CanvasTexture(c);
+    tex.minFilter = THREE.LinearFilter;
+    const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false }));
+    sp.scale.set(1.5, 0.375, 1);
+    return sp;
+  }
+
+  const propNodes = new Map();   // name -> Group
+
+  function syncProps(objects) {
+    if (!Array.isArray(objects) || !objects.length) return;
+    const seen = new Set();
+    for (const o of objects) {
+      seen.add(o.name);
+      let node = propNodes.get(o.name);
+      if (!node) {
+        node = buildProp(o.name);
+        const label = buildLabel(o.name);
+        // 标签浮在物体上方，用物体自身高度做偏移
+        label.position.set(0, 2.9, 0);
+        node.add(label);
+        propGroup.add(node);
+        propNodes.set(o.name, node);
+      }
+      node.position.x = o.x;
+      node.position.z = o.z;
+    }
+    // 服务端不再返回的物件就移除，避免画面里留下幽灵
+    for (const [name, node] of propNodes) {
+      if (!seen.has(name)) {
+        propGroup.remove(node);
+        propNodes.delete(name);
+      }
+    }
+  }
 
   const floorMesh = new THREE.Mesh(
     new THREE.PlaneGeometry(FLOOR, FLOOR),
@@ -1471,30 +1618,37 @@ const viewport = (function initViewport() {
                     : state.expr === "sad" ? 0.6 : 1.0;
     eyes.forEach(e => { e.scale.y += (eyeScaleY - e.scale.y) * 0.15; });
 
-    // ── 真实位移 ──
-    // 之前只做了车身起伏（position.y），机器人其实原地不动，看起来像"抖了几下"。
-    // 现在按 heading 推进，走满 targetDist 或碰到边界才停。
-    if (state.moving) {
-      // 速度映射：speed 0..1 → 每秒 1.2..4.2 个单位
-      const v = (1.2 + state.speed * 3.0) * 0.016;
-      const step = Math.min(v, Math.max(0, state.targetDist - state.movedDist));
+    // ── 位置 ──
+    // 以服务端广播的空间坐标为准，平滑插值过去。
+    //
+    // 之前这里是前端自己按 heading 累加位移，服务端并不知道机器人在哪，
+    // 于是"模型以为自己走向书架"和"画面上走向书架"是两件互不相干的事，
+    // 走完位置也不进上下文。现在坐标只有一份（env_simulator 持有），
+    // 前端只是把它画出来，走多远、走到哪，模型下次看状态时是知道的。
+    if (spatialTarget && typeof spatialTarget.x === "number") {
+      const px = robot.position.x, pz = robot.position.z;
+      const tx = spatialTarget.x, tz = spatialTarget.z;
+      const dx = tx - px, dz = tz - pz;
+      const dist = Math.hypot(dx, dz);
 
-      const dx = Math.sin(state.heading) * step;
-      const dz = Math.cos(state.heading) * step;
+      if (dist > 0.02) {
+        // 插值系数随距离调整：远时走得快，近了自然减速，避免瞬移感
+        const k = Math.min(1, 0.06 + dist * 0.02);
+        robot.position.x = px + dx * k;
+        robot.position.z = pz + dz * k;
+        worldOffset.set(robot.position.x - px, 0, robot.position.z - pz);
+      }
 
-      const nx = robot.position.x + dx;
-      const nz = robot.position.z + dz;
-      const outOfBound = Math.hypot(nx, nz) > BOUND;
-
-      if (step <= 0.0001 || outOfBound) {
-        state.moving = false;             // 走完或撞到边界
-      } else {
-        robot.position.x = nx;
-        robot.position.z = nz;
-        state.movedDist += step;
-        worldOffset.set(dx, 0, dz);
+      // 朝向对齐服务端的 heading（服务端用"面向 -z 为 0"的约定）
+      if (typeof spatialTarget.heading === "number") {
+        const want = THREE.MathUtils.degToRad(spatialTarget.heading);
+        let diff = want - state.heading;
+        diff = Math.atan2(Math.sin(diff), Math.cos(diff));   // 归一化到 -π..π
+        state.heading += diff * 0.12;
+        robot.rotation.y = state.heading;
       }
     }
+
 
     // 轮子：移动时按实际位移滚动，停下后逐渐静止
     const spinRate = state.moving ? (1.2 + state.speed * 3.0) * 2.2 : 0;
@@ -1598,6 +1752,8 @@ const viewport = (function initViewport() {
       // 转向：车身也朝向移动方向（仅左右时改变朝向观感）
       state.moving = true;
     },
+    /** 按空间状态摆放房间物件。renderSpace 在 IIFE 外部调用它。 */
+    syncProps,
     setCamera(mode) {
       if (!camTargets[mode]) return;
       state.camMode = mode;
@@ -1814,6 +1970,8 @@ function connect() {
       TOPIC.EFFECTOR_LED, TOPIC.EFFECTOR_EXPRESSION, TOPIC.EFFECTOR_GESTURE,
       // 世界输入：env_simulator 与真实硬件都往这四个话题注入
       TOPIC.SENSOR_VISION, TOPIC.SENSOR_AUDIO, TOPIC.SENSOR_TOUCH, TOPIC.SENSOR_INTERO,
+      // 空间状态：物件位置与机器人坐标，用于绘制房间
+      "animat/env/status",
     ], { qos: 1 });
     log("已订阅 motor / cortex/* / heartbeat / state / effector/* / sensor/*", "sys");
   });
@@ -1860,9 +2018,9 @@ function onMessage(topic, payload) {
   if (topic === TOPIC.MOTOR) {
     const cmd = data.command || "?";
     const params = data.params || {};
-    // 移动指令：参数有两种来源，必须都兼容
-    //   1) LLM 工具 move：扁平结构 {command, direction, speed, distance_cm}
-    //   2) 意图动作树：嵌套结构 {command, params:{...}}
+    // 移动指令的两种结构都兼容：
+    //   1) 工具调用（registry 会把参数平铺到顶层后再发 motor.params）
+    //   2) 反射弧等内部路径的扁平结构
     if (cmd === "move") {
       viewport.setMotion({
         direction: data.direction ?? params.direction,
@@ -1872,16 +2030,21 @@ function onMessage(topic, payload) {
       const d = data.direction ?? params.direction ?? "forward";
       const cm = data.distance_cm ?? params.distance_cm ?? 30;
       log("🚗 移动: " + d + " " + cm + "cm", "motor");
-    }
-    if (cmd === "speak") {
-      // 只有真正说出口的话才进对话窗口。空文本（独白被静默）直接忽略，
-      // 否则会在对话窗里留下空气泡。
+    } else if (cmd === "speak") {
+      // mode 决定这句话出现在哪里：
+      //   mutter = 自言自语，只进内心窗（它自己念叨，不指望有人听见）
+      //   aloud / call = 说给外面听，进对话窗
+      // 这个区分来自模型调用 speak 时给的参数，不再由系统按情感猜。
       const sayText = (params.text || "").trim();
-      if (sayText) chatMsg("animat", sayText);
+      const mode = params.mode || "aloud";
+      if (sayText && mode !== "mutter") chatMsg("animat", sayText);
+      else if (sayText) log("💭 嘀咕: " + sayText, "cortex");
+    } else {
+      log("🔧 Motor: " + cmd + " " + JSON.stringify(params), "motor");
     }
-    else log("🔧 Motor: " + cmd + " " + JSON.stringify(params), "motor");
   } else if (topic === TOPIC.CORTEX_OUTPUT) {
-    log("🧠 Intent: " + data.intent + " | " + String(data.text || "").slice(0, 80), "cortex");
+    log("🧠 " + (data.intent || "?") + (data.mode ? "[" + data.mode + "]" : "")
+        + " | " + String(data.text || "").slice(0, 80), "cortex");
   } else if (topic === TOPIC.CORTEX_THOUGHT) {
     // 每一次内部思维（内心独白）流入右侧"内心思考"窗口
     renderThought(data);
@@ -1889,6 +2052,24 @@ function onMessage(topic, payload) {
     // heartbeat 太频繁，静默不打印（需要时可在控制台查看）
   } else if (topic === TOPIC.STATE) {
     renderAnimatState(data);
+  } else if (topic === "animat/env/status") {
+    // 空间状态：绘制房间物件，并把机器人摆到真实坐标上。
+    // 这份数据与模型读到的是同一份，所以画面和它的认知不会分叉。
+    if (data && data.space) renderSpace(data.space);
+  }
+}
+
+function renderSpace(space) {
+  // syncProps 定义在 viewport 的 IIFE 内部，通过返回对象暴露出来，
+  // 这里直接调名字是够不到的。
+  if (viewport && typeof viewport.syncProps === "function") {
+    viewport.syncProps(space.objects || []);
+  }
+  spatialTarget = space;
+  const placeEl = document.getElementById("stPlace");
+  if (placeEl) {
+    const at = space.at ? space.at : `(${space.x}, ${space.z})`;
+    placeEl.textContent = at;
   }
 }
 

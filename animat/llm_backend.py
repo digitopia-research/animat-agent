@@ -60,7 +60,7 @@ def _repair_truncated_json(payload: str) -> Optional[dict]:
     """尝试修复被 max_tokens 截断的工具调用 JSON。
 
     模型生成长参数时可能被截断，典型形态:
-        {"name": "move", "arguments": {"direction": "forward", "distance_cm": 100
+        {"name": "move_to", "arguments": {"place": "书架", "speed": 0.4
     只要单次调用本身信息完整（name + 若干成对参数），就值得尽量救回来，
     而不是整条丢弃。
     """
@@ -492,6 +492,15 @@ class LocalLLM:
         tool_results: 最近几次工具执行结果。必须回注，否则模型不知道
           自己刚刚已经搜过/已经开过灯，会原地反复请求同一个工具。
         """
+        # 强制关闭思考：自发思维是"随口一想"，不是解数学题。
+        #
+        # 实测在带 tools 的长 prompt 下，Qwen3 会重新开始长篇思考
+        # （"我该不该移动呢...或者先表达一下情绪..."），把 max_tokens
+        # 吃光，正文和 tool_call 都没机会输出。表现为 tools=0、
+        # 或输出被截断在半句。
+        # /no_think 必须放在 user 消息里才生效，而消息末尾是
+        # "先写 <intent> 标签"这种指令，紧跟在冒号后面模型容易忽略，
+        # 这里单独起一行、放在结尾指令之前更稳妥。
         messages = [{"role": "system", "content": system_prompt}]
         
         # 构建上下文
@@ -505,7 +514,11 @@ class LocalLLM:
             )
             context_parts.append("## 最近和对方的对话:\n" + conv_lines)
         if sensor_context:
-            context_parts.append("## 身体感觉:\n" + sensor_context)
+            # 标签叫"感知"，不叫"身体感觉"：这段里既有电量体温（身体），
+            # 也有位置和周围物体（外部世界）。叫"身体感觉"会让模型把
+            # "沙发在 8.9 米外"理解成自己的生理读数，而不是一个
+            # 可以去的地方，于是它只会坐着描述，不会想到走过去。
+            context_parts.append("## 你此刻的感知:\n" + sensor_context)
         if tool_results:
             # 回注工具结果：模型据此判断"这件事已经做过了"，
             # 不再无谓地重复请求同一个工具（曾出现同一搜索连发四次）。
@@ -513,16 +526,26 @@ class LocalLLM:
                 "## 你刚才做过的事:\n" + "\n".join(tool_results)
             )
         
+        # 结尾指令曾经是"先写 <intent> 标签，再写想法"，它把工具调用那句
+        # 规则整个盖过去了：模型只需要产出一个标签就算交差，
+        # 于是连续十几轮 tools=0，哪怕上下文里明明写着"沙发在 8.9 米外"。
+        # 现在只有两种出口——写想法，或者调用工具，二者并列，不分先后，
+        # 也不再提供任何比工具更省事的捷径。
+        #
+        # /no_think 单独一行放最前，保证被识别；
+        # _apply_no_think 追加到末尾时会因为已存在而跳过。
+        tail = (
+            "\n\n/no_think\n"
+            "现在产生一个简短的内部想法。只想要点什么就写一两句；"
+            "真想动手去做，就输出 <tool_call> 调用工具，本轮不必再写想法："
+        )
         if context_parts:
             messages.append({
                 "role": "user",
-                "content": "\n\n".join(context_parts) + "\n\n按上面要求的格式产生一个简短的内部想法（先 <intent> 标签，再写想法）："
+                "content": "\n\n".join(context_parts) + tail
             })
         else:
-            messages.append({
-                "role": "user",
-                "content": "按上面要求的格式产生一个简短的内部想法（先 <intent> 标签，再写想法）："
-            })
+            messages.append({"role": "user", "content": tail.strip()})
 
         return self.stream_complete(
             messages=messages,

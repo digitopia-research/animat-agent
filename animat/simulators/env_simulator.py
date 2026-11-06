@@ -47,6 +47,7 @@ from typing import Callable, Optional
 import aiomqtt
 
 from animat.config import Topic
+from animat.spatial import SpatialState
 
 logger = logging.getLogger("animat.env_simulator")
 
@@ -163,6 +164,11 @@ class EnvironmentSimulator:
         self._person_until: float = 0.0
         self._person_distance: float = 1.5
         self._person_gaze: float = 1.0
+
+        # 机器人在房间里的真实位置。与 3D 视图共用同一套坐标，
+        # 前端按这份数据摆放物体和机器人，模型按这份数据算距离，
+        # 所以"它说走向书架"和"画面上真的走过去"是同一件事。
+        self._space = SpatialState()
 
         # 内感状态：只保留本模块拥有的部分。
         # 电量/体温/充电判定全部交给 bot_simulator（body.html），
@@ -411,30 +417,135 @@ class EnvironmentSimulator:
             except Exception as e:
                 logger.warning("事件注入失败: %s", e)
 
-    async def _listen_motor(self, client: aiomqtt.Client) -> None:
-        """监听 Animat 的动作，用来驱动"认知负载"。
+    async def _on_motor(self, message) -> None:
+        """处理一条 motor 指令。
 
-        这是内感因果链的关键：它说话/移动时电量掉得快、体温微升，
-        于是"我很累/我有点热"就不是凭空编的，而是有其物理前因。
+        aiomqtt 的 client.messages 是单一异步流，同一 client 上开两个
+        `async for` 会互相抢消息——后起的那个会一直收不到东西。
+        因此这里不再自己开循环，而是由 _listen_control 那个唯一消费者
+        按话题转发进来。
+
+        历史教训：这个函数原来是 `_listen_motor(client)`，自带
+        `async for`，但 run() 的 tasks 列表里漏了它——于是它从上线起
+        就没跑过。表现是"模型在调 move_to，3D 里人一动不动"，
+        而日志里连一条错误都没有。
         """
-        async for message in client.messages:
-            topic = str(message.topic)
-            if topic == Topic.MOTOR:
-                try:
-                    payload = json.loads(message.payload.decode())
-                except (json.JSONDecodeError, UnicodeDecodeError):
-                    continue
-                cmd = payload.get("command")
+        topic = str(message.topic)
+        if topic == Topic.MOTOR:
+            try:
+                payload = json.loads(message.payload.decode())
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                return
+            cmd = payload.get("command")
+            # 每条指令单独兜异常：_apply_* 抛一次不该让整个 MQTT
+            # 消费循环静默结束（那样外部只会看到"服务还活着、
+            # 状态还在发，但从此不响应任何动作指令"）。
+            try:
                 if cmd == "speak":
                     self._load = min(1.0, self._load + 0.35)
-                elif cmd == "move":
+                elif cmd in ("move", "move_to"):
                     self._load = min(1.0, self._load + 0.5)
-                # 不再因为"去找充电器"就自行改充电状态：
-                # 充电由 bot_simulator 根据同一条 motor 指令处理，
-                # 这里插一脚会让两边状态不一致。
-            elif topic == Topic.CORTEX_THOUGHT:
-                # 每产生一次思维就计入负载
-                self._load = min(1.0, self._load + 0.12)
+                    # 机器人真的移动了：更新空间坐标，并把"走到了哪、
+                    # 现在离什么更近了"作为一帧视觉反馈发回去。
+                    await self._apply_move(payload)
+                elif cmd == "look_around":
+                    self._load = min(1.0, self._load + 0.1)
+                    await self._apply_look(payload)
+            except Exception:
+                logger.exception("处理 motor 指令失败: %s", cmd)
+            # 不再因为"去找充电器"就自行改充电状态：
+            # 充电由 bot_simulator 根据同一条 motor 指令处理，
+            # 这里插一脚会让两边状态不一致。
+        elif topic == Topic.CORTEX_THOUGHT:
+            # 每产生一次思维就计入负载
+            self._load = min(1.0, self._load + 0.12)
+
+    async def _apply_move(self, payload: dict) -> None:
+        """处理一次真实移动。
+
+        `place` 由模型通过 move_to 工具声明。工具把它直接写在 payload 顶层
+        （registry 会把参数平铺进 payload），而旧的 motor 指令把它放在
+        params 里——两种都要认，否则"模型说去书架"与"机器人动了"
+        会各走各的。
+        """
+        params = payload.get("params") or {}
+        place = payload.get("place") or params.get("place")
+        # 步长由 speed 决定（0.0-1.0 → 1.0-4.0 米/次）。
+        #
+        # 原来固定走 1 米，而房间半径 17 米、沙发在 8.9 米外：
+        # 一次 move_to 只挪 1 米，模型下一轮看到距离几乎没变，
+        # 于是再喊一次——在它看来"走过去"这个动作是不起作用的。
+        # 一轮对话之间的间隔有好几秒，1 米/轮远低于"走过去"应有的位移。
+        speed = float(payload.get("speed") or params.get("speed") or 0.4)
+        step = 1.0 + max(0.0, min(1.0, speed)) * 3.0
+
+        if place:
+            result = self._space.move_toward(place, step=step)
+            if result is None:
+                logger.warning("移动目标不存在: %s", place)
+                return
+        else:
+            # 无目的地：沿当前朝向前进 1 米
+            self._space.x += math.sin(math.radians(self._space.heading))
+            self._space.z -= math.cos(math.radians(self._space.heading))
+            r = math.hypot(self._space.x, self._space.z)
+            if r > self._space.world.radius:
+                self._space.x *= self._space.world.radius / r
+                self._space.z *= self._space.world.radius / r
+            result = "approaching"
+
+        here = self._space.at_object()
+        if result == "arrived" and here:
+            text = f"你走到了{here.name}旁。{here.desc}。"
+            logger.info("🚶 到达 %s (%.1f, %.1f)", here.name, self._space.x, self._space.z)
+        else:
+            target = self._space.target or place or "前方"
+            left = ""
+            tgt = next((o for o in self._space.world.objects if o.name == target), None)
+            if tgt:
+                left = f"，还有 {self._space.distance_to(tgt):.1f} 米"
+            text = f"你正朝{target}移动{left}。"
+            logger.info("🚶 移动中 -> %s", target)
+
+        # 位置变化走视觉通道：走到新地方看到新东西，本来就是视觉。
+        await self._publish(Topic.SENSOR_VISION, {
+            "event": "moved",
+            "event_text": text,
+            "place": here.name if here else None,
+            "position": {"x": round(self._space.x, 2), "z": round(self._space.z, 2)},
+            "heading": round(self._space.heading, 1),
+            "ambient_light": self._circadian.ambient_light,
+        }, qos=0)
+
+    async def _apply_look(self, payload: dict) -> None:
+        """处理一次 look_around：原地转身，回一帧"现在看到什么"。
+
+        这是最廉价的动作：不走动、不改坐标，只换一个视角。
+        它的意义在于给"我想确认一下"一个可执行的形态——
+        没有它的话，模型对空间的好奇只能二选一：要么什么都不做，
+        要么真的走一趟，中间没有便宜的选择。
+        """
+        # direction 有两种来源，必须都认：
+        #   工具调用（registry 平铺参数）  {"command":"look_around","direction":"left"}
+        #   内部路径（嵌套）              {"command":"...","params":{"direction":...}}
+        direction = (payload.get("direction")
+                     or (payload.get("params") or {}).get("direction")
+                     or "around")
+        facing = self._space.turn(direction)
+        text = self._space.describe()
+        logger.info("👀 环视 -> 面向%s", facing)
+
+        await self._publish(Topic.SENSOR_VISION, {
+            "event": "looked",
+            "event_text": text,
+            "facing": facing,
+            "position": {"x": round(self._space.x, 2), "z": round(self._space.z, 2)},
+            "heading": round(self._space.heading, 1),
+            "ambient_light": self._circadian.ambient_light,
+        }, qos=0)
+        # 位置没变但朝向变了，_on_space_update 的指纹包含 heading，
+        # 会触发一次空间文本重算，模型下一轮读到的是新视角。
+        await self._publish_status()
 
     async def _handle_command(self, line: str, reply: Optional[Callable[[str], None]] = None) -> bool:
         """执行一条命令，把结果交给 reply 回调（默认打印）。
@@ -514,6 +625,9 @@ class EnvironmentSimulator:
             # 本页只提供环境量与认知负载。
             "imu_tilt_deg": round(self._tilt, 1),
             "load": round(self._load, 2),
+            # 空间状态：位置、朝向、可见物体及真实距离。
+            # 前端据此绘制，模型据此决定去哪——同一份数据，不是两套叙事。
+            "space": self._space.look(),
             "event_count": self._event_count,
             "last_event": self._last_event,
             "ts": time.time(),
@@ -541,9 +655,14 @@ class EnvironmentSimulator:
         回执里带 ok/msg 两个字段，网页可以据此给出即时反馈，
         不必等下一次状态轮询。
         """
+        logger.info("👂 控制通道已就绪，开始消费消息")
         async for message in client.messages:
             topic = str(message.topic)
+            # 这里是本进程**唯一**的 client.messages 消费者。
+            # motor / cortex.thought 不分发出去的话，它们就永远没人处理
+            # （aiomqtt 的 messages 是单一异步流，不能被两个 async for 共享）。
             if topic != Topic.ENV_CONTROL:
+                await self._on_motor(message)
                 continue
             # 无条件记一行：排查"按钮没反应"时，第一个要确认的就是
             # 命令究竟有没有到达模拟器。放在解析之前，连载荷损坏也能看见。

@@ -100,6 +100,11 @@ class ToolRegistry:
                 payload: dict[str, Any] = dict(args)
                 if spec.command:
                     payload = {"command": spec.command, **payload}
+                else:
+                    # 没有 command 的工具，用工具名标识这次投递。
+                    # 订阅方（action.py）按 intent 字段识别，
+                    # 缺了它整条消息会被当成未知意图丢掉。
+                    payload = {"intent": spec.name, "command": spec.name, **payload}
                 # 异步 fire，MQTT 拥堵不应阻塞思维循环
                 await nervous.fire(spec.topic, payload)
                 self._last_call[name] = now

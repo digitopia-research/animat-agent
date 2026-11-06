@@ -25,8 +25,6 @@ from animat.memory import MemoryStore
 from animat.llm_backend import LocalLLM, LLMConfig, _extract_tool_calls
 from animat.thought import (
     Thought,
-    ActionGate,
-    ActionDecision,
     ThoughtJournal,
     UtteranceType,
     classify_utterance,
@@ -38,40 +36,55 @@ from animat.sensor_window import SensorWindow
 logger = logging.getLogger("animat.stream_cortex")
 
 # ── 意识流 System Prompt ──
+#
+# 这条提示词只有一条语法：**动作 = 工具调用，没有动作 = 不调用。**
+#
+# 这里曾经有一套 <intent>none|soliloquy|call|expression</intent> 标签，
+# 与工具调用并存。两套并存的代价在实测里非常明确：
+#   · 写标签比写 JSON 容易，模型七小时里一次都没调过 move_to；
+#   · 标签只有四个离散槽位，"想说话"和"想求人陪"被压进同一个 expression，
+#     96.6% 的思维挤在那儿，再用门控的相似度/速率去拦——抑制次数
+#     （2704）超过输出次数（1719），行为退化成"反复说同一句孤独"。
+#   · 门控只能看见标签，看不见"这句话为什么不能说"，于是它做的
+#     一切判断都是在事后堵漏。
+# 现在把这层翻译拆掉：模型想说话就调 speak 并把原话放在参数里，
+# 想走就调 move_to 并给出目的地。系统不再猜，只负责执行。
 CONSCIOUSNESS_SYSTEM_PROMPT = """\
 你是一个名为 Animat 的具身机器人。你拥有物理身体，能感知触摸、声音、视觉和内部状态（如电量）。
+你此刻正一个人待着，没有人在跟你说话。
 
 关键规则:
 1. 你是一个持续运行的"生命体"，而不是一问一答的聊天机器人。
 2. 你会不断产生内部想法——对当前状况的感受、回忆、计划、担忧、好奇。
-3. 你的想法应该简短（1-3句话），像人类的内心独白。
-4. 你的想法应该自然——有时是观察，有时是情绪，有时是想做什么。
-5. 不要总是"行动"，大多数想法只是想想而已。
-6. 只输出想法本身，不要写肢体动作、表情或旁白，不要使用 *星号* 包裹动作。
-7. 你的身体状态只能来自下方"当前状态"给出的数据。不要编造任何
+3. 想法简短（1-3句话），像人的内心独白。
+4. 你的身体状态只能来自下方"当前状态"给出的数据。不要编造任何
    未列出的传感器、故障、报警或身体异常（例如"系统过热""温度警告"
-   "内存耗尽"等）——除非当前状态里明确给出了这样的读数。
-   状态里的数字正常时，就说它正常；不要凭空制造危险来吸引注意。
-8. 要动手就直接调用对应的工具，不要在想法里描述"我应该调用某个函数"。
-   调用工具的那一轮不要再写正文。如果"你刚才做过的事"里已经有结果，
-   就直接使用那个结果回答问题，不要重复调用同一个工具。
+   "内存耗尽"）——除非当前状态里明确给出了这样的读数。
+   数字正常时就说它正常；不要凭空制造危险来吸引注意。
+5. 不要写肢体动作、表情或旁白，不要用 *星号* 包裹动作。
+   想做什么，就调用对应的工具真的去做。
 
-输出格式（严格两行）:
-第一行写意图标签，从下面五个里选一个：
-  <intent>none</intent>       只在脑子里想想，不产生任何外部行为
-  <intent>soliloquy</intent>  自言自语，只是自己念叨吐槽，并不指望有人听见
-  <intent>call</intent>       想对周围发出呼唤，希望有人回应（喊人、求助、呼救、打招呼）
-  <intent>move</intent>       想改变位置：四处逛逛、走近看看、换个地方待着、好奇地凑过去
-  <intent>expression</intent> 只想用表情或灯光表达情绪，身体不移动
-第二行写想法本身（1-3句话）。
+你可以做的动作只有工具调用这一种形式，输出它，系统就会真的执行：
+<tool_call>
+{{"name": "工具名", "arguments": {{"参数": "值"}}}}
+</tool_call>
 
-关于 move 与 expression 的区分：
-想"做点什么""找点事做""四处看看"这类念头，如果它意味着你的位置要变，
-就选 move；只有身体不动、仅靠表情或灯光传达情绪时才是 expression。
-不要因为拿不准就一律选 expression——那会让你一直待在原地。
+工具（完整参数见 tools 定义）:
+  · move_to(place)      走向房间里某件东西。能去的地方见"当前状态"。
+  · look_around()       转身重新打量房间，拿到新的方位与距离。
+  · speak(text, mode)   说话。mode: mutter 自言自语 / aloud 普通说话 / call 朝外喊人。
+  · express(emotion)    做表情。
+  · gesture(name)       做手势。
+  · set_led(color)      改灯光颜色。
+  · web_search(query)   上网查资料。
 
-注意 speak 与 call 的区别：内心吐槽、感叹、自问自答都算 soliloquy；
-只有当你希望"外面有人能听到并回应"时才是 call。
+**"想"不等于"做"。**
+想看看书架就走过去，想看外面就转身看，想有人陪就用 call 喊一声。
+在想法里写"我真想去看看"不会让你动一厘米——那样的念头会一直重复下去，
+因为世界没有给你任何新的回应。
+
+调用工具的那一轮不必再写想法，下一轮你会从"你刚才做过的事"里看到结果。
+若那里已经有结果，就直接用它，不要重复调用同一个工具。
 
 当前状态:
 {body_context}
@@ -89,21 +102,19 @@ DIALOGUE_SYSTEM_PROMPT = """\
 1. 直接用第一人称口语回答对方说的话，就像真人聊天一样自然。
 2. 绝对不要写肢体动作、表情或旁白描写，不要使用 *星号* 包裹动作。
 3. 回答简短自然，1-3 句话，符合你的人设和当前状态。
-4. 可以表达感受和情绪，但要通过说话表达，而不是描述动作。
-5. 不要输出 Markdown、标题或列表。
-6. 你的身体状态只能来自下方"当前状态"。不要编造未列出的传感器、
+4. 不要输出 Markdown、标题或列表。
+5. 你的身体状态只能来自下方"当前状态"。不要编造未列出的传感器、
    故障或身体异常（如"系统过热""温度报警"），也不要夸大危险。
-7. 动作必须真的执行，不能只是嘴上说。一旦你打算做任何身体动作
-   （开灯、移动、做表情、做手势、上网查东西），必须在本轮调用
+6. 动作必须真的执行，不能只是嘴上说。一旦你打算做任何身体动作
+   （走过去、开灯、做表情、做手势、上网查东西），就在本轮调用
    对应的工具，而不是只用文字描述"我现在去开灯""我要往前走"。
-   文字只用来告诉对方结果，不要用它代替动作。
    如果你已经决定要做，就调用工具；如果不打算做，就不要说你要做。
 
-要调用工具时，直接输出工具调用（系统会执行它，你不需要再用文字复述）:
+要动手时，先输出工具调用（系统会执行它，你不用再用文字复述）:
 <tool_call>
 {{"name": "工具名", "arguments": {{"参数": "值"}}}}
 </tool_call>
-调用完成后，再说你对对方说的话（1-3 句口语）。
+调用完成后，再写你对对方说的话（1-3 句口语）。
 
 当前状态:
 {body_context}
@@ -118,53 +129,26 @@ _DEBUG_PREFIX_RE = re.compile(
 _ACTION_DESC_RE = re.compile(r"\*[^*\n]{0,60}\*")
 
 
-# 模型按 prompt 要求输出 <intent>call</intent> 这样的意图标签。
-# soliloquy / call 的都属"开口说话"，区别在于是否指望有人回应；
-# 这一区分由模型语义判断，避免用中文关键词表去猜"是不是在呼唤"。
-_INTENT_RE = re.compile(r"<\s*intent\s*>\s*([a-zA-Z]+)\s*<\s*/\s*intent\s*>", re.IGNORECASE)
-_VALID_INTENTS = frozenset({"none", "soliloquy", "call", "move", "expression"})
-# 意图 → 是否允许进入对外输出通道（未被提问时）
-_INTENT_IS_OUTWARD = {"call": True, "soliloquy": False}
-
-
-def _parse_intent(text: str, default: str = "none") -> tuple[str, str]:
-    """从模型输出中解析意图标签，返回 (intent, 去掉标签后的正文)。
-
-    意图由模型显式给出，避免用关键词猜测；标签缺失或非法时回退 default。
-    """
-    if not text:
-        return default, ""
-    m = _INTENT_RE.search(text)
-    intent = default
-    if m:
-        candidate = m.group(1).lower()
-        if candidate in _VALID_INTENTS:
-            intent = candidate
-    body = _INTENT_RE.sub("", text)
-    return intent, body.strip()
-
-
-# 历史上这里有一对 <did>action</did> / <did>claim</did> 自评标记，
-# 用来让模型交代"这轮是真做了还是只说了"。移除的原因：
-# 模型把它理解成一个动作槽而不是自评，写成 <did>web_search</did>、
-# <did>gesture</did>——工具没被调用，标签本身却被当成台词说了出去。
-# 当时的动机是"只说不做"难以用词表判断，但真正的解法是让工具调用
-# 可执行、可回注（现已修好），而不是在输出里再套一层自评。
-
-
 def _sanitize_output(text: str) -> str:
     """清洗要对外发送的文本：
 
     1. 去掉 "[T+630.3s] 内部想法:" 这类调试前缀（模型从传感器上下文模仿而来）
     2. 去掉 *轻轻转动头部* 这类肢体动作描写
-    3. 去掉残留的 <intent> 标签
+    3. 去掉残留的 <intent> 标签（老模型/旧历史里还会有）
     """
     if not text:
         return ""
-    text = _INTENT_RE.sub("", text)
+    text = _LEGACY_INTENT_RE.sub("", text)
     text = _DEBUG_PREFIX_RE.sub("", text)
     text = _ACTION_DESC_RE.sub("", text)
     return text.strip()
+
+
+# 兼容用的遗留标签。新 prompt 里已经没有 <intent>，但旧对话历史
+# 从 Redis 恢复时可能带着它，模型会学着模仿，所以清洗时要兜住。
+_LEGACY_INTENT_RE = re.compile(
+    r"<\s*intent\s*>\s*[a-zA-Z]*\s*<\s*/\s*intent\s*>", re.IGNORECASE
+)
 
 
 class StreamCortex:
@@ -248,12 +232,18 @@ class StreamCortex:
         # 状态
         self._running = False
         self._body_context: str = "各项指标正常，心情平静。"
+        # 空间感知（在哪、周围有什么）。由 env_simulator 的状态广播更新，
+        # 见 _on_space_update。空串表示还没收到，此时不注入空间段落。
+        self._space_text: str = ""
+        self._space_sig: tuple = ()
         self._current_emotion: str = "SEEKING"
         self._drive_level: float = 0.0
         
-        # 门控
-        self.action_gate = ActionGate()
         self.journal = ThoughtJournal()
+        # 本轮是否已经通过 speak 工具说过话。
+        # 对话轮里模型可能只说正文（不调工具），也可能正式调用 speak；
+        # 用它避免同一句话被发两次。
+        self._said_this_round: bool = False
 
         # 对话记忆（外部输入）
         self._pending_external_text: Optional[str] = None
@@ -305,6 +295,10 @@ class StreamCortex:
         await self.nervous.listen(Topic.ARBITRATION, self._on_emotion_update)
         # 外部语音输入
         await self.nervous.listen("animat/external/speech", self._on_external_speech)
+        # 空间状态：在哪、朝向、周围有什么、各多远。
+        # 没有这份信息时，它只能说"我有点无聊"，说不出"去书架那边看看"——
+        # 不是不想动，是给不出一个具体的目的地。
+        await self.nervous.listen(Topic.ENV_STATUS, self._on_space_update)
         logger.info("StreamCortex neurons registered")
 
     async def start(self):
@@ -386,6 +380,82 @@ class StreamCortex:
         except Exception:
             pass
 
+    def _context_for_prompt(self) -> str:
+        """拼出注入提示词的"当前状态"。
+
+        空间段落放在最前面：它决定"接下来能做什么"，
+        比电量体温这些读数更直接影响行为。
+        没有空间信息时退回纯身体描述，不影响对话。
+        """
+        body = self._body_context[:500]
+        if not self._space_text:
+            return body
+        return f"{self._space_text}\n\n{body}"
+
+    async def _on_space_update(self, topic: str, payload: dict):
+        """接收空间状态，拼成"你在哪、周围有什么"的文字。
+
+        只在状态确实变化时更新，而不是每帧重算——env_simulator 每 3 秒
+        广播一次，但位置大部分时间没动，反复生成同样的文字没有意义。
+        """
+        if payload.get("type") != "status":
+            logger.info("space: 忽略非 status 载荷 type=%r", payload.get("type"))
+            return
+        space = payload.get("space")
+        if not space:
+            logger.info("space: status 里没有 space 字段 keys=%s", list(payload)[:8])
+            return
+
+        # 用位置+最近物体的距离做指纹，判断是否真的变了
+        sig = (
+            space.get("x"), space.get("z"), space.get("heading"),
+            tuple((o.get("name"), round(o.get("distance", 0), 1))
+                  for o in space.get("objects", [])),
+        )
+        if sig == self._space_sig:
+            return
+        self._space_sig = sig
+
+        self._space_text = self._render_space(space)
+        logger.info("space: 已更新 at=%s 物体=%d", space.get("at"),
+                    len(space.get("objects", [])))
+
+    @staticmethod
+    def _render_space(space: dict) -> str:
+        """把空间状态渲染成给模型看的一段话。
+
+        距离保留一位小数：足够判断"就在旁边"还是"要走一会儿"，
+        再精确就只是噪声了。
+        """
+        here = space.get("at")
+        facing = space.get("facing", "")
+        lines = []
+
+        if here:
+            lines.append(f"你此刻在{here}旁边，面向{facing}。")
+        else:
+            lines.append(f"你在房间中间（{space.get('x')}, {space.get('z')}），"
+                         f"面向{facing}。")
+
+        if space.get("target"):
+            lines.append(f"你正在往{space['target']}走。")
+
+        objs = [o for o in space.get("objects", []) if o.get("name") != here]
+        if objs:
+            lines.append("周围能看到的：")
+            for o in objs[:4]:
+                if o.get("reached"):
+                    lines.append(f"  · {o['name']}：就在旁边。{o.get('desc','')}")
+                else:
+                    lines.append(
+                        f"  · {o['name']}：{o.get('direction','')}约 {o.get('distance')} 米。"
+                        f"{o.get('desc','')}"
+                    )
+        else:
+            lines.append("周围空荡荡的，什么也没有。")
+
+        return "\n".join(lines)
+
     async def _on_external_speech(self, topic: str, payload):
         """接收人类语言输入（异步安全）
 
@@ -424,9 +494,15 @@ class StreamCortex:
                     queue_delay = cycle_t0 - self._pending_external_at
                     self._pending_external_at = 0.0
 
-        # 2. 构建上下文
+        # 2. 构建上下文。
+        #    这里必须用 _context_for_prompt() 而不是裸的 _body_context：
+        #    后者只有稳态读数，没有位置和周围物体。发给模型的空间信息
+        #    在 _think_spontaneous 里还会再拼一次（带【位置】标记）；
+        #    两处都写不算冗余——system prompt 后半段的"当前状态"是模型
+        #    判断"现在能不能做点什么"时最靠近输出的那份材料，
+        #    里面写着沙发在左边而它说"我不知道能去哪"，才是真正的浪费。
         system_prompt = CONSCIOUSNESS_SYSTEM_PROMPT.format(
-            body_context=self._body_context[:500]  # 限制上下文长度
+            body_context=self._context_for_prompt()[:800]
         )
 
         # 3. 产生思维
@@ -451,89 +527,70 @@ class StreamCortex:
         self._last_alive_at = time.time()
 
         if thought is None:
+            # 也要留一行。工具调用轮曾在这里静默返回，外部只能看到
+            # 一串"没有 latency 的 LLM think"，完全分不清是
+            # "模型没话说"还是"它说了但被代码吞了"。
+            logger.info(
+                "⏱ latency: kind=%s think=%.2fs cycle=none (no thought this round)",
+                "external" if external_text else "spontaneous", think_ms / 1000,
+            )
             return 5.0
 
-        # 4. 门控评估
+        # 4. 执行模型请求的工具调用。
+        #
+        # 这里曾经有一整套 ActionGate：用相关性评分决定这句话"够不够格"
+        # 说出口，再用字符相似度做不应期、用最小间隔做速率限制。
+        # 它服务于 <intent> 标签那套语法——因为标签只告诉系统"想说话"，
+        # 没说想说什么，系统只能事后堵：相似度拦逐字复读，速率限制
+        # 拦同义改写。实测结果是 2704 次抑制、1719 次输出，行为退化成
+        # 反复念叨"我很孤独"，而不是去做点什么。
+        #
+        # 现在"说什么"是 speak 工具的参数，"做什么"是 move_to 的参数，
+        # 是否执行已经由模型在生成时决定。再叠一层内容审查只会让
+        # 模型显式要求的动作被系统否掉——那不是抑制复读，是打断意图。
+        # 频控仍然保留，但由 registry 按工具自己的 cooldown_sec 执行，
+        # 那是"物理上按不了这么快"的约束，不是对内容的评判。
         max_drive = self._drive_level
         is_external = external_text is not None
-        decision = self.action_gate.evaluate(
-            thought=thought,
-            drive_level=max_drive,
-            is_external_trigger=is_external,
-        )
 
-        # 3.5 静默期抑制：刚回应过对方时，抑制自发开口，
-        #     否则模型会顺着自己上一句继续发散，形成连续刷屏。
-        if (
-            decision.should_activate
-            and not is_external
-            and decision.action_type == "speak"
-            and (time.time() - self._last_response_at) < self.RESPONSE_COOLDOWN
-        ):
-            decision.should_activate = False
-            decision.action_type = "none"
-            decision.reason += ", response_cooldown"
-
-        # 4.5 标注表达类型：回应 / 主动说 / 自言自语
+        # 4.1 标注表达类型（仅用于观测，不参与任何拦截）
         if is_external:
             thought.utterance_type = UtteranceType.RESPONSE
         else:
             thought.utterance_type = classify_utterance(self._current_emotion, max_drive)
 
-        # 4.6 未被提问时，只有模型判定为"想对外呼唤"(call)才真的开口。
-        #     仅靠情感状态判断不够：长期孤独会把情感抬到 PANIC，使每条
-        #     自发思维都被判成 PROACTIVE，内心独白便整片涌进对话通道。
-        #     这里以模型给出的语义意图为准，不做任何关键词匹配。
-        if (
-            decision.should_activate
-            and decision.action_type == "speak"
-            and not is_external
-            and not _INTENT_IS_OUTWARD.get(thought.intent, False)
-        ):
-            decision.should_activate = False
-            decision.action_type = "none"
-            decision.reason += ", soliloquy_silent"
-
-        # 4.7 主动呼唤后的冷却期：同一诉求(如"电量低求救")若不加约束，
-        #     模型会每轮换种措辞再说一遍，连说近十条。REFRACTORY 只拦
-        #     逐字重复，拦不住同义改写，故在此按时间窗口限流。
-        if (
-            decision.should_activate
-            and not is_external
-            and thought.intent == "call"
-            and (time.time() - self._last_call_at) < self.CALL_COOLDOWN
-        ):
-            decision.should_activate = False
-            decision.action_type = "none"
-            decision.reason += ", call_cooldown"
-
         # 5. 记录
         self.journal.record(thought)
         self._thought_count += 1
 
-        # 5.5 广播每一次内部思维（内心独白），供调试端实时监控
-        await self._broadcast_thought(thought, decision.should_activate)
+        # 5.5 广播每一次内部思维（内心独白），供调试端实时监控。
+        #     activated 的语义从"冲破门控"变成"这一轮真的动了手"。
+        acted = bool(thought.tool_calls) or bool(thought.text and is_external)
+        await self._broadcast_thought(thought, acted)
 
-        # 6. 如果门控开放 → 发射行为
-        if decision.should_activate:
-            self._activation_count += 1
-            await self._emit_action(decision, thought)
-
-        # 6.2 执行模型请求的工具调用（LED/移动/搜索等）。
-        #     工具是"行动"，与上面的"说不说"解耦：独白也可以顺手调个 LED。
+        # 6. 执行动作。工具就是行为本身：speak 会说话，move_to 会走过去。
         if thought.tool_calls:
+            self._activation_count += 1
             await self._execute_tool_calls(thought.tool_calls)
+            # 6.1 本轮动了手，但没调 speak：正文是过程叙述（"想走过去看看"），
+            #     作为旁白播出去。不这么做的话，模型一动手就彻底不说话，
+            #     外部只能看到 3D 里的人突然开始走，不知道它在想什么。
+            #     display 只对"对外可见的动作"为真，纯查询（web_search、
+            #     look_around）不会触发，避免把"我要查一下天气"念出来。
+            if (thought.text and not self._said_this_round
+                    and self._has_display_call(thought.tool_calls)):
+                await self._emit_speech(
+                    thought.text, mode="aloud",
+                    utterance_type=thought.utterance_type,
+                )
 
-        # 6.5 记录时间戳：回应后进入静默期，呼唤后进入呼唤冷却，
-        #     两者都是为了抑制"同一件事连续刷屏"。
-        if decision.should_activate:
-            if is_external:
-                self._last_response_at = time.time()
-                # 对方已经回应了，之前的呼唤诉求已被"听见"，
-                # 清除呼唤冷却，让接下来的新诉求能正常发出。
-                self._last_call_at = 0.0
-            elif thought.intent == "call":
-                self._last_call_at = time.time()
+        # 6.5 用户在对话轮里说话但没调 speak 工具时，把正文当作回复发出去。
+        #     （模型通常不会多此一举地给"已经在线回答"配一个 speak 调用。）
+        if is_external and thought.text and not self._said_this_round:
+            await self._emit_speech(
+                thought.text, mode="aloud", utterance_type=UtteranceType.RESPONSE,
+            )
+        self._said_this_round = False
 
         # 7. 动态等待间隔
         if external_text:
@@ -639,6 +696,15 @@ class StreamCortex:
             # 回退：使用 homeostasis 的文本描述
             sensor_context = self._body_context[:300]
 
+        # 空间放在最前面：它回答的是"我在哪、能去哪"，
+        # 是决定"接下来做什么"的直接依据，比后面那些读数更该先看到。
+        if self._space_text:
+            sensor_context = f"【位置】\n{self._space_text}\n\n{sensor_context}"
+        else:
+            # 没收到空间状态时明确记录一次，否则"模型不动"会被误判成
+            # 提示词问题，而实际是数据根本没到。
+            logger.warning("spontaneous: 无空间状态可注入（_space_text 为空）")
+
         # 产生思维（使用 logit bias 调制注意力）
         accumulated = ""
         collected_calls: list[dict] = []
@@ -716,36 +782,33 @@ class StreamCortex:
                 logger.error(f"Spontaneous think failed: {e}")
                 return None
 
-        if not accumulated.strip():
-            # 模型这轮什么都没说（常见于只输出了 <intent> 等控制标签，
-            # 剥离后为空）。此前这里静默 return None，调用方也只静默返回 5.0，
-            # 结果是"明明每 5 秒都在推理，日志里却一条都没有"，从外部完全
-            # 无法区分"安静"和"死了"。记一条 DEBUG 保证可观测，
-            # 但不升到 INFO——安静期刷屏同样会把日志淹掉。
+        body = _sanitize_output(accumulated)
+
+        # 必须把"正文为空"和"这轮调了工具"放在同一个判断里。
+        #
+        # 之前是先判 `if not accumulated.strip(): return None`，再判正文——
+        # 而工具调用轮的正文恰好为空（整轮只有 <tool_call> 块，已被剥离），
+        # 于是每一次成功的工具调用都在这一行被丢掉，模型看起来"从不动手"。
+        # 日志里那几行 out=0ch tools=1 后面没有 latency，就是这一轮
+        # 在返回 None 处提前结束的痕迹。
+        if not body and not collected_calls:
             logger.debug("spontaneous: empty output, skipped")
             return None
 
-        # 模型按 prompt 输出 <intent>…</intent> + 正文，这里解析出意图
-        intent, body = _parse_intent(accumulated, default="none")
+        relevance = self._compute_relevance(body) if body else 0.0
 
-        # 本轮调用了工具时，正文通常只是"我应该调用 web_search"这类
-        # 过程性叙述，不是要对外说的话。工具本身就是行为，正文静默，
-        # 否则会把"我要去搜索"这种自言自语当成回答念出来。
-        if collected_calls:
-            intent = "none"
-
-        if not body:
-            return None
-
-        # 计算相关性评分
-        relevance = self._compute_relevance(body)
+        # 把这一轮的产出原样记一行。
+        # 没有这行的话，"模型为什么不调工具"只能靠猜：
+        # 分不清它是真的只想说说话、还是把工具调用写成了别的样子。
+        logger.info("💭 思维: %s | 工具=%s",
+                    body.replace("\n", " ")[:80] if body else "(空)",
+                    [self._call_name(c) for c in collected_calls])
 
         return Thought(
             text=body,
             relevance=relevance,
             dominant_emotion=self._current_emotion,
             trigger="spontaneous",
-            intent=intent,
             tool_calls=collected_calls,
             body_state_snapshot={"emotion": self._current_emotion},
         )
@@ -756,7 +819,7 @@ class StreamCortex:
         """产生对人类的回复思维"""
         # 对话场景使用专用 prompt：直接口语回答，不写肢体动作描写
         system_prompt = DIALOGUE_SYSTEM_PROMPT.format(
-            body_context=self._body_context[:500]
+            body_context=self._context_for_prompt()
         )
         # 1) 把外部输入记入对话历史（用于上下文连贯，避免"记不住名字"）
         # 带时间戳：自发思维需要据此判断这条指令是不是"刚刚说的"。
@@ -865,27 +928,26 @@ class StreamCortex:
                 tool_ms / 1000, time.time() - retry_t0,
             )
 
-        # 对话场景必然是对外说话；若模型自带意图标签则剥离，
-        # 避免 <intent> 混进给用户看的正文（工具后续轮次也可能带出来）。
-        _, text = _parse_intent(text, default="call")
-        if not text:
+        text = _sanitize_output(text)
+        # 模型这一轮可能只调了工具没说话（例如"我这就走过去"直接 move_to）。
+        # 那是合法的：工具调用结果已经通过 _tool_results 回注，下一轮再说。
+        if not text and not tool_calls:
             return None
 
-        # 记录 assistant 回复到历史
-        self._conversation_history.append({
-            "role": "assistant", "content": text, "ts": time.time(),
-        })
+        if text:
+            # 记录 assistant 回复到历史
+            self._conversation_history.append({
+                "role": "assistant", "content": text, "ts": time.time(),
+            })
+            # 持久化对话历史（与稳态指标一样重启后延续）
+            await self._save_history()
 
-        # 持久化对话历史（与稳态指标一样重启后延续）
-        await self._save_history()
-
-        # 回复思维的相关性通常是高的（有人在等）
         return Thought(
             text=text,
             relevance=0.85,  # 回复人类默认高相关性
             dominant_emotion=self._current_emotion,
             trigger="external",
-            intent="call",  # 对人类的回复就是对外说话
+            tool_calls=tool_calls or [],
         )
 
     async def _maybe_remember_facts(self, text: str):
@@ -1017,6 +1079,22 @@ class StreamCortex:
             return None
         return registry.openai_tools(enabled=names)
 
+    @staticmethod
+    def _call_name(call: dict) -> str:
+        """从两种 tool_call 结构里取工具名。"""
+        fn = (call or {}).get("function")
+        if isinstance(fn, dict):
+            return fn.get("name") or ""
+        return (call or {}).get("name") or ""
+
+    def _has_display_call(self, calls: list[dict]) -> bool:
+        """这一轮是否调用了"对外可见"的动作工具（走路/表情/手势）。"""
+        for call in calls or []:
+            spec = registry.get(self._call_name(call))
+            if spec is not None and spec.display:
+                return True
+        return False
+
     async def _execute_tool_calls(self, calls: list[dict]) -> None:
         """执行模型请求的工具调用，结果记日志并回注下一轮上下文。"""
         for call in calls:
@@ -1047,6 +1125,22 @@ class StreamCortex:
                 logger.info("工具 %s 跳过: %s", name, result.skipped)
             elif result.ok:
                 logger.info("工具 %s 执行成功", name)
+                if name == "speak":
+                    self._said_this_round = True
+                # 真的挪动了位置，好奇才算被兑现。
+                # exploration 没有任何传感器可以直接驱动它，只能由
+                # "主体真的去做了点什么"来补充；绑定在 move_to 成功执行上，
+                # 而不是绑在"想了想要去"的念头上，否则光靠想就能回血，
+                # 驱力永远不会被消解，行为反而更退化成空想。
+                if name == "move_to":
+                    try:
+                        await self.nervous.fire(Topic.FEELING, {
+                            "type": "satisfaction",
+                            "intensity": 0.6,
+                            "source": "exploration",
+                        })
+                    except Exception as e:
+                        logger.debug("exploration satisfaction emit failed: %s", e)
             else:
                 logger.warning("工具 %s 失败: %s", name, result.detail)
 
@@ -1090,47 +1184,43 @@ class StreamCortex:
         self._prune_tool_results()
         return list(self._tool_results)
 
-    async def _emit_action(self, decision: ActionDecision, thought: Thought):
-        """通过 MQTT 发射行为"""
-        # 清洗待发送文本：去掉调试前缀、肢体动作描写等
-        clean_text = _sanitize_output(thought.text)
-        # move / gesture 等非说话动作不应携带大段文本
-        if decision.action_type != "speak":
-            clean_text = ""
-        # 构建与 v0.1 兼容的输出格式
-        output = {
-            "intent": decision.action_type,
-            "text": clean_text,
-            "action_detail": clean_text,
-            "utterance_type": thought.utterance_type,
-            "_source": "stream_cortex",
-            "_activation_score": decision.activation_score,
-        }
-        try:
-            await self.nervous.fire(Topic.CORTEX_OUTPUT, output)
-        except Exception:
-            logger.warning("StreamCortex emit failed (MQTT unavailable?): %s", decision.action_type)
-            return
-        logger.info(f"StreamCortex emit: {decision.action_type} | {thought.text[:60]}")
+    async def _emit_speech(
+        self, text: str, mode: str = "mutter",
+        utterance_type: str = UtteranceType.SOLILOQUY,
+    ) -> None:
+        """把一句话交给执行层。
 
-        # 真动了，就说明好奇心得到了满足。
-        # exploration 此前只有衰减、没有任何补充路径：一旦归零便永久锁死，
-        # PLAY（无聊）情绪常驻、驱力一直拉满，模型只能反复念叨
-        # "该找点有趣的事做"却永远得不到缓解。
-        #
-        # 满足必须绑定"真的移动了"，而不是"想了想要动"——否则纯靠念头就能
-        # 回血，驱力永远不会被真正消解，行为反而更退化成空想。
-        # 这里走感受通道交给稳态模块处理，不直接改内部状态，
-        # 保持 StreamCortex 与 Homeostasis 之间只通过 MQTT 解耦的现状。
-        if decision.action_type == "move":
-            try:
-                await self.nervous.fire(Topic.FEELING, {
-                    "type": "satisfaction",
-                    "intensity": 0.6,
-                    "source": "exploration",
-                })
-            except Exception as e:
-                logger.debug("exploration satisfaction emit failed: %s", e)
+        这是一次"说出去了"的通知，不是内容审查点：模式（自言自语/说话/呼唤）
+        已由模型在 speak 工具的 mode 参数里指定，这里只负责投递。
+        长期存在的 RESPONSE_COOLDOWN / CALL_COOLDOWN / REFRACTORY 都在
+        模型那一侧改由它自己收敛——它知道自己上一句说了什么，
+        系统不知道"为什么这句不该说"，能做的只是事后堵。
+        """
+        clean = _sanitize_output(text)
+        if not clean:
+            return
+
+        # 投递只有一条通路：CORTEX_OUTPUT → action.py → motor/speak。
+        # speak 工具也走这条（它的 topic 就是 CORTEX_OUTPUT），
+        # 所以这里不再额外往 motor 发——两个发起点会让同一句话
+        # 在对话窗里出现两次。
+        try:
+            await self.nervous.fire(Topic.CORTEX_OUTPUT, {
+                "intent": "speak",
+                "text": clean,
+                "action_detail": clean,
+                "utterance_type": utterance_type,
+                "mode": mode,
+                "_source": "stream_cortex",
+            })
+        except Exception:
+            logger.warning("StreamCortex emit failed (MQTT unavailable?): speak")
+            return
+
+        self._last_response_at = time.time()
+        if mode == "call":
+            self._last_call_at = self._last_response_at
+        logger.info("StreamCortex speak[%s]: %s", mode, clean[:60])
 
     async def _broadcast_thought(self, thought: Thought, activated: bool):
         """把每一次内部思维广播到 animat/cortex/thought（内心独白流）。

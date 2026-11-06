@@ -230,15 +230,22 @@ class CloudLLM:
         if sensor_context:
             context_parts.append("## 身体感觉:\n" + sensor_context)
 
+        # 结尾指令与本地后端保持一致：只有两种出口——写想法，或调用工具。
+        # （这里曾要求"先 <intent> 标签，再写想法"，那套标签已整体移除，
+        # 两套语法并存会让模型挑省事的那条，而不是真的去动。）
+        tail = (
+            "\n\n现在产生一个简短的内部想法。只想要点什么就写一两句；"
+            "真想动手去做，就输出 <tool_call> 调用工具，本轮不必再写想法："
+        )
         if context_parts:
             messages.append({
                 "role": "user",
-                "content": "\n\n".join(context_parts) + "\n\n按上面要求的格式产生一个简短的内部想法（先 <intent> 标签，再写想法）："
+                "content": "\n\n".join(context_parts) + tail
             })
         else:
             messages.append({
                 "role": "user",
-                "content": "按上面要求的格式产生一个简短的内部想法（先 <intent> 标签，再写想法）："
+                "content": tail.strip()
             })
 
         return self.stream_complete(
