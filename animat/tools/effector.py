@@ -64,7 +64,10 @@ def register_effector_tools() -> None:
     # 改成工具后，"说不说"由模型决定，"说什么"就在参数里，不再需要猜测。
     registry.register(ToolSpec(
         name="speak",
-        display=True,
+        # display 不能置真：display 的用途是"这一轮做了动作但没说出口，
+        # 拿正文补一句旁白"。speak 已经把原话放在参数里说完了，
+        # 再走一次旁白通道就是同一句话发两遍（实测对话窗出现重复气泡）。
+        display=False,
         description=(
             "开口说话。想说点什么、想喊人、想自言自语时都用这个。"
             "文字必须是你要说的原话，不要写动作描写。"

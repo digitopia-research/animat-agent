@@ -512,6 +512,19 @@ class StreamCortex:
             if external_text:
                 # 外部输入 → 产生回复思维
                 thought = await self._think_response(system_prompt, external_text)
+            elif self._pending_external_text:
+                # 此刻用户已经开口，只是还没轮到处理。
+                #
+                # 实测过这个场景：用户说"蓝色的书被我拿走了"，而它正在跑
+                # 上一轮的spontaneous，于是继续输出"我找到了一些关于乌镇峰会的
+                # 最新信息"——用户的话被完整地无视了一轮，直到下一轮才轮到。
+                # 对一个"具身"的智能体来说这很致命：它在自言自语，
+                # 同时有人在跟它说话，而它对后者毫无反应。
+                #
+                # 用户的话优先于自我表达，这一轮直接让位，把算力让给
+                # 马上要处理的对话。返回 0 间隔，让主循环立刻进入下一轮。
+                logger.info("⏸ 自发轮让位：有未处理的用户输入")
+                return 0.0
             else:
                 # 自发思维
                 thought = await self._think_spontaneous(system_prompt)
@@ -942,8 +955,19 @@ class StreamCortex:
             # 持久化对话历史（与稳态指标一样重启后延续）
             await self._save_history()
 
+        # 模型已经通过 speak 工具把这句话说出去了，就不再让 Thought 带着
+        # 同一份 text 往上走。
+        #
+        # 否则 _think_cycle 会再投递一次（"external 轮有正文且本轮没说过话
+        # 就发出去"），对话窗里出现重复气泡。这条规则本身是为"模型只写正文
+        # 不调工具"准备的，一旦它真的调了 speak，正文就已经是已完成的动作，
+        # 不该再被当作待发送内容。
+        already_spoken = any(
+            self._call_name(c) == "speak" for c in (tool_calls or [])
+        )
+
         return Thought(
-            text=text,
+            text="" if already_spoken else text,
             relevance=0.85,  # 回复人类默认高相关性
             dominant_emotion=self._current_emotion,
             trigger="external",
@@ -1088,9 +1112,17 @@ class StreamCortex:
         return (call or {}).get("name") or ""
 
     def _has_display_call(self, calls: list[dict]) -> bool:
-        """这一轮是否调用了"对外可见"的动作工具（走路/表情/手势）。"""
+        """这一轮是否调用了"对外可见"的动作工具（走路/表情/手势）。
+
+        刻意排除 speak：speak 本身就是把话说完，它的参数里已经带了原话，
+        不再需要拿正文当旁白——否则同一句话投递两次。
+        这里要的是"做了动作但没说话"的情形，用正文补一句解说。
+        """
         for call in calls or []:
-            spec = registry.get(self._call_name(call))
+            name = self._call_name(call)
+            if name == "speak":
+                continue
+            spec = registry.get(name)
             if spec is not None and spec.display:
                 return True
         return False
@@ -1127,6 +1159,7 @@ class StreamCortex:
                 logger.info("工具 %s 执行成功", name)
                 if name == "speak":
                     self._said_this_round = True
+                    await self._remember_own_speech(args.get("text") or "")
                 # 真的挪动了位置，好奇才算被兑现。
                 # exploration 没有任何传感器可以直接驱动它，只能由
                 # "主体真的去做了点什么"来补充；绑定在 move_to 成功执行上，
@@ -1184,6 +1217,34 @@ class StreamCortex:
         self._prune_tool_results()
         return list(self._tool_results)
 
+    async def _remember_own_speech(self, text: str) -> None:
+        """把"我自己刚说过的话"记进对话历史。
+
+        这是自我意识里最容易被忽略的一条：模型必须知道**自己**说了什么，
+        否则会原样重复。实测它把"我希望能和更多人交流，学习更多东西。"
+        一字不差地连说了四遍——因为自发轮的 speak 只发到 CORTEX_OUTPUT，
+        从未写回给它自己看的上下文。它每轮都在"第一次说这句话"。
+
+        记成 assistant 角色，和它回答用户时的记录形式一致，
+        这样无论哪种来源的发言，下一轮读到的都是同一份"我说过什么"。
+        """
+        clean = _sanitize_output(text)
+        if not clean:
+            return
+        # 与上一条完全相同时不再追加：真正的无意义复读，
+        # 记进去只会让上下文里出现四个一样的句子，反而强化它。
+        for prev in reversed(self._conversation_history[-3:]):
+            if prev.get("role") == "assistant" and prev.get("content") == clean:
+                return
+        self._conversation_history.append({
+            "role": "assistant", "content": clean, "ts": time.time(),
+        })
+        if len(self._conversation_history) > self.MAX_CONVERSATION_MEMORY * 2:
+            self._conversation_history = (
+                self._conversation_history[-self.MAX_CONVERSATION_MEMORY * 2:]
+            )
+        self._trim_history_by_length()
+
     async def _emit_speech(
         self, text: str, mode: str = "mutter",
         utterance_type: str = UtteranceType.SOLILOQUY,
@@ -1220,6 +1281,10 @@ class StreamCortex:
         self._last_response_at = time.time()
         if mode == "call":
             self._last_call_at = self._last_response_at
+        # 只对自己嘀咕的话不必进对话历史（那不是"我对你说了什么"），
+        # 其余都要，否则下一轮它不知道自己刚才开口过。
+        if not (mode == "mutter" and utterance_type != UtteranceType.RESPONSE):
+            await self._remember_own_speech(clean)
         logger.info("StreamCortex speak[%s]: %s", mode, clean[:60])
 
     async def _broadcast_thought(self, thought: Thought, activated: bool):
