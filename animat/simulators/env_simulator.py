@@ -169,6 +169,9 @@ class EnvironmentSimulator:
         # 前端按这份数据摆放物体和机器人，模型按这份数据算距离，
         # 所以"它说走向书架"和"画面上真的走过去"是同一件事。
         self._space = SpatialState()
+        # 行走序号：每次 move_to 自增，旧的行走循环看到序号变了就退出，
+        # 于是"半路改主意去别处"能立刻生效而不是两条路径同时改坐标。
+        self._walk_seq = 0
 
         # 内感状态：只保留本模块拥有的部分。
         # 电量/体温/充电判定全部交给 bot_simulator（body.html），
@@ -470,47 +473,118 @@ class EnvironmentSimulator:
         """
         params = payload.get("params") or {}
         place = payload.get("place") or params.get("place")
-        # 步长由 speed 决定（0.0-1.0 → 1.0-4.0 米/次）。
-        #
-        # 原来固定走 1 米，而房间半径 17 米、沙发在 8.9 米外：
-        # 一次 move_to 只挪 1 米，模型下一轮看到距离几乎没变，
-        # 于是再喊一次——在它看来"走过去"这个动作是不起作用的。
-        # 一轮对话之间的间隔有好几秒，1 米/轮远低于"走过去"应有的位移。
-        speed = float(payload.get("speed") or params.get("speed") or 0.4)
-        step = 1.0 + max(0.0, min(1.0, speed)) * 3.0
 
         if place:
-            result = self._space.move_toward(place, step=step)
-            if result is None:
-                logger.warning("移动目标不存在: %s", place)
+            # 走路必须是一段过程，不能是一次坐标跳跃。
+            #
+            # 这里曾经是"按 speed 算一个 1~4 米的步长，直接改坐标"——
+            # 一次调用就把人从房间这头挪到那头，画面上看是整体搬移，
+            # 而不是走过去。当时的动机是"1 米/轮太慢，模型以为没动"，
+            # 但那是**每轮只走一步**造成的，不是步长太小造成的。
+            # 正确的修法是让单次 move_to 覆盖整段路程，但把它拆成
+            # 许多帧逐步推进；而不是把一步调大，一次跨完。
+            await self._walk_to(place, float(payload.get("speed") or params.get("speed") or 0.4))
+            return
+
+        # 无目的地：沿当前朝向前进 1 米。
+        # 这条分支只服务内部的旧调用方，模型走的都是带 place 的那条。
+        self._space.x += math.sin(math.radians(self._space.heading))
+        self._space.z -= math.cos(math.radians(self._space.heading))
+        r = math.hypot(self._space.x, self._space.z)
+        if r > self._space.world.radius:
+            self._space.x *= self._space.world.radius / r
+            self._space.z *= self._space.world.radius / r
+
+        here = self._space.at_object()
+        await self._publish_space_frame("arrived" if here else "walking", None)
+
+    async def _walk_to(self, place: str, speed: float) -> None:
+        """走向某个地方，途中持续广播位置。
+
+        这是"走路"和"瞬移"的分界线：位置不是一次改完，而是按约 20Hz
+        小步推进，每一帧都发布一次空间状态，前端据此插值播放。
+
+        参数 speed 的语义从"一步跨多远"变成"走多快"：
+          0.0 → 0.6 m/s（散步），1.0 → 3.0 m/s（快走）。
+        单次 move_to 会一路走到底，所以对模型来说"走过去"
+        仍然是一次调用就完成，它不需要连喊十几次。
+
+        途中被打断（新的移动指令）就停下，由新指令接管。
+        """
+        obj = next((o for o in self._space.world.objects if o.name == place), None)
+        if obj is None:
+            logger.warning("移动目标不存在: %s", place)
+            return
+
+        # 用序号标记这次行走，新指令到来时旧循环自行退出。
+        self._walk_seq += 1
+        seq = self._walk_seq
+        self._space.target = place
+        self._space.heading = math.degrees(
+            math.atan2(obj.x - self._space.x, -(obj.z - self._space.z))
+        ) % 360
+
+        speed = max(0.0, min(1.0, speed))
+        mps = 0.6 + speed * 2.4          # 米/秒
+        tick = 0.05                      # 20Hz
+
+        logger.info("🚶 出发 -> %s（%.1f 米，%.1f m/s）",
+                    place, self._space.distance_to(obj), mps)
+
+        while self._walk_seq == seq:
+            remaining = self._space.distance_to(obj)
+            if remaining <= obj.reach:
+                self._space.target = None
+                await self._publish_space_frame("arrived", obj.name)
+                logger.info("🚶 到达 %s (%.1f, %.1f)",
+                            obj.name, self._space.x, self._space.z)
                 return
-        else:
-            # 无目的地：沿当前朝向前进 1 米
-            self._space.x += math.sin(math.radians(self._space.heading))
-            self._space.z -= math.cos(math.radians(self._space.heading))
+
+            step = min(mps * tick, remaining)
+            dx, dz = obj.x - self._space.x, obj.z - self._space.z
+            self._space.x += dx / remaining * step
+            self._space.z += dz / remaining * step
+
+            # 出界拉回，与前端 BOUND 行为一致
             r = math.hypot(self._space.x, self._space.z)
             if r > self._space.world.radius:
                 self._space.x *= self._space.world.radius / r
                 self._space.z *= self._space.world.radius / r
-            result = "approaching"
 
+            await self._publish_space_frame("walking", place)
+            await asyncio.sleep(tick)
+
+    async def _publish_space_frame(self, event: str, target: Optional[str]) -> None:
+        """广播一帧位置。
+
+        两条通道各有分工，缺一不可：
+
+          1. animat/env/status —— 前端画小人用的。网页只在这个话题上
+             调用 renderSpace 更新 robot 坐标；如果只发 SENSOR_VISION，
+             画面上的人是不会动的（SENSOR_VISION 走的是事件日志渲染）。
+          2. animat/sensor/vision —— 模型读的"视野里发生了什么"。
+             只在到达时给 event_text，途中给空字符串：否则每 50ms
+             一句"还有 x 米"会把感知窗口刷满同一句话。
+
+        走路期间状态话题从 3 秒一次临时提到 20Hz，是这一处刻意的例外：
+        位置必须连续，否则看起来就是瞬移。整段路通常只有几秒。
+        """
         here = self._space.at_object()
-        if result == "arrived" and here:
+        if event == "arrived" and here:
             text = f"你走到了{here.name}旁。{here.desc}。"
-            logger.info("🚶 到达 %s (%.1f, %.1f)", here.name, self._space.x, self._space.z)
         else:
-            target = self._space.target or place or "前方"
-            left = ""
-            tgt = next((o for o in self._space.world.objects if o.name == target), None)
-            if tgt:
-                left = f"，还有 {self._space.distance_to(tgt):.1f} 米"
-            text = f"你正朝{target}移动{left}。"
-            logger.info("🚶 移动中 -> %s", target)
+            tgt = next((o for o in self._space.world.objects
+                        if o.name == (target or "")), None)
+            left = f"，还有 {self._space.distance_to(tgt):.1f} 米" if tgt else ""
+            text = f"你正朝{target or '前方'}移动{left}。"
 
-        # 位置变化走视觉通道：走到新地方看到新东西，本来就是视觉。
+        # 前端绘制用：整份状态（含物件），每帧一次
+        await self._publish_status()
+
         await self._publish(Topic.SENSOR_VISION, {
-            "event": "moved",
-            "event_text": text,
+            "event": "moved" if event == "arrived" else "walking",
+            # 途中不写 event_text：每帧一句"还有 x 米"会刷满感知窗口
+            "event_text": text if event == "arrived" else "",
             "place": here.name if here else None,
             "position": {"x": round(self._space.x, 2), "z": round(self._space.z, 2)},
             "heading": round(self._space.heading, 1),

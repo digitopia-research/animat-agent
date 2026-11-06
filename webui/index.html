@@ -1398,6 +1398,9 @@ const viewport = (function initViewport() {
     expr: "neutral",
     // 运动：moving 期间按 heading 以 speed 前进，直到 targetDist 走完
     moving: false, speed: 0.4, heading: 0, targetDist: 0, movedDist: 0,
+    // 服务端坐标是否在变化（由位置帧驱动），与上面的 moving 相互独立：
+    // moving 是前端自己模拟的老路径，spatialMoving 是服务端真实位移。
+    spatialMoving: false,
     targetTilt: 0, camMode: "TP",
   };
 
@@ -1565,8 +1568,12 @@ const viewport = (function initViewport() {
     if (antenna) antenna.rotation.z = Math.sin(t * 2.1) * 0.09;
 
     // 人形：行走时摆臂摆腿，静止时轻微呼吸
+    // walking 需要同时看两路：state.moving 是前端自模拟的老路径，
+    // state.spatialMoving 是服务端坐标真的在变。只看前者的话，
+    // 模型让它走过去时坐标在滑、腿却是僵的。
+    const walking = state.moving || state.spatialMoving;
     if (arms.length || legs.length) {
-      if (state.moving) {
+      if (walking) {
         const gait = t * 7.5;
         legs.forEach(p => { p.rotation.x = Math.sin(gait + (p.userData.side > 0 ? Math.PI : 0)) * 0.55; });
         // 手臂与对侧腿同步（人类步态）
@@ -1632,12 +1639,21 @@ const viewport = (function initViewport() {
       const dist = Math.hypot(dx, dz);
 
       if (dist > 0.02) {
-        // 插值系数随距离调整：远时走得快，近了自然减速，避免瞬移感
-        const k = Math.min(1, 0.06 + dist * 0.02);
+        // 服务端现在按 20Hz 推送连续位置，这里只需"跟上"，不必"追赶"。
+        // 原来系数是 0.06 + dist*0.02（每秒约 6%），本意是消除瞬移感，
+        // 但它追的是一个每次跳 1~4 米的坐标——结果变成先僵住、
+        // 再猛地窜过去，看起来仍是整体搬移。
+        // 现在每帧位移只有几厘米，用较高的跟随系数即可平滑贴合。
+        const k = Math.min(1, 0.35 + dist * 0.15);
         robot.position.x = px + dx * k;
         robot.position.z = pz + dz * k;
         worldOffset.set(robot.position.x - px, 0, robot.position.z - pz);
       }
+
+      // 行走动画由"位置是否在变"驱动，而不是由 motor 指令驱动。
+      // 后端不再有"走一步"的离散指令，身体位移是每帧连续推进的；
+      // 用位移判断，腿和轮子才会真正动起来，而不是坐标滑过去、人却在僵着。
+      state.spatialMoving = dist > 0.03;
 
       // 朝向对齐服务端的 heading（服务端用"面向 -z 为 0"的约定）
       if (typeof spatialTarget.heading === "number") {
@@ -1651,12 +1667,12 @@ const viewport = (function initViewport() {
 
 
     // 轮子：移动时按实际位移滚动，停下后逐渐静止
-    const spinRate = state.moving ? (1.2 + state.speed * 3.0) * 2.2 : 0;
+    const spinRate = walking ? (1.2 + state.speed * 3.0) * 2.2 : 0;
     wheelSpin += spinRate * 0.016;
     wheels.forEach(w => { w.rotation.x = wheelSpin; });
 
     // 车身起伏只在移动时出现
-    robot.position.y = state.moving ? Math.abs(Math.sin(t * 11)) * 0.035 : 0;
+    robot.position.y = walking ? Math.abs(Math.sin(t * 11)) * 0.035 : 0;
 
     // 访客淡入淡出
     if (state.personVisible) {
