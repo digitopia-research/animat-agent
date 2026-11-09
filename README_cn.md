@@ -208,7 +208,7 @@ animat-agent/
 │   ├── brain.py           # 双进程脑 (StreamCortex 持续层 + 潜意识循环 + 心跳)
 │   ├── stream_cortex.py   # [P1] 恒常意识流引擎 (LLM 永不休眠, 已集成)
 │   ├── thought.py         # [P1] Thought、ActionGate 三层门控、ThoughtJournal (已集成)
-│   ├── attention_modulator.py # [P2] 注意力调制器 (模块已完成, 未接入主运行时)
+│   ├── attention_modulator.py # [P2] 注意力调制器 (已接入 stream_cortex.py)
 │   ├── sensor_window.py   # [P3] 原始传感时序窗口 (已集成)
 │   ├── vector_memory.py   # [P4] faiss 状态依赖记忆 (模块已完成, 未接入主运行时)
 │   ├── llm_backend.py     # 本地 LLM 封装 (llama-cpp-python)
@@ -241,9 +241,10 @@ animat-agent/
 └── LICENSE
 ```
 
-> 实现状态：Phase 1 / 3 / 5 已集成到运行中的 agent；Phase 2（AttentionModulator）与
+> 实现状态：Phase 1 / 2 / 3 / 5 已集成到运行中的 agent；Phase 2（AttentionModulator）已接入
+> `stream_cortex.py`（每轮自发思维都计算 logit bias 并传入推理），与 v0.1 稳态文本调制并存。
 > Phase 4（VectorMemoryStore）已完成独立模块并经 demo 验证，但主运行时暂未接线（当前生产
-> 仍使用 v0.1 稳态文本调制 + Redis 记忆）。详见 `README.md` 的 Roadmap 表与 `docs/ROADMAP_v0.2.md`。
+> 仍使用 Redis 记忆）。详见 `README.md` 的 Roadmap 表与 `docs/ROADMAP_v0.2.md`。
 
 ## MQTT Topic 通路
 

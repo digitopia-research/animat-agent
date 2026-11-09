@@ -118,7 +118,7 @@ v0.2 makes four fundamental shifts. The following diagram shows the new data flo
 
 ### Key Innovations in v0.2
 
-> Implementation status: Phases 1, 3, and 5 are integrated into the running agent. Phases 2 (AttentionModulator) and 4 (VectorMemoryStore) are **implemented as standalone modules and demo-verified, but not yet wired into the main runtime** — production currently uses the v0.1 homeostasis text-modulation and Redis memory. See the Roadmap table below for details.
+> Implementation status: Phases 1, 2, 3, and 5 are integrated into the running agent. Phase 2 (AttentionModulator) is wired into `stream_cortex.py` (logit bias is computed and passed into inference on every spontaneous thought) and runs **alongside** the v0.1 homeostasis text-modulation. Phase 4 (VectorMemoryStore) is **implemented as a standalone module and demo-verified, but not yet wired into the main runtime** — production memory still uses `memory.py` (Redis). See the Roadmap table below for details.
 
 #### 1. Perpetual Stream of Consciousness (Phase 1)
 
@@ -257,7 +257,7 @@ docker run -d --gpus all -p 8080:8080 \
   -v /opt/data/models:/models \
   ghcr.io/ggerganov/llama.cpp:server \
   -m /models/qwen2.5-7b-instruct-q4_k_m.gguf \
-  --host 0.0.00 --port 8080
+  --host 0.0.0.0 --port 8080
 ```
 
 Then set the environment variable to point to the server:
@@ -376,7 +376,7 @@ open `http://localhost:8000/`, then connect to `ws://<host>:8083/mqtt`.
 ```
 animat-agent/
 ├── animat/                          # Core package
-│   ├── __init__.py                  # Package metadata (v0.1.0)
+│   ├── __init__.py                  # Package metadata (v0.2.0)
 │   ├── __main__.py                  # python -m animat entry point
 │   ├── main.py                      # CLI entry point + boot orchestrator
 │   │
@@ -385,7 +385,7 @@ animat-agent/
 │   │                                #   LLM never sleeps; continuous thought generation
 │   ├── thought.py                   # [P1] Thought, ActionGate (3-layer gating),
 │   │                                #   ThoughtJournal (thought archive)
-│   ├── attention_modulator.py       # [P2] Token probability modulator (module done; NOT yet wired into main runtime)
+│   ├── attention_modulator.py       # [P2] Token probability modulator (wired into stream_cortex.py)
 │   │                                #   BodyState → logit bias for 5 semantic clusters
 │   ├── sensor_window.py             # [P3] Raw sensor time-series window
 │   │                                #   Exposes structured sensor data to LLM context
@@ -520,12 +520,12 @@ See [docs/ROADMAP_v0.2.md](docs/ROADMAP_v0.2.md) for the full v0.2 development r
 | Phase | Status | Description |
 |:------|:-------|:------------|
 | Phase 1 | Done (integrated) | Perpetual consciousness stream — LLM never sleeps; wired into `brain.py`/`stream_cortex.py` |
-| Phase 2 | Implemented, not integrated | Attention modulation — body state shifts token probabilities. Module lives in `attention_modulator.py` and is validated by `demo_attention_modulator.py`, but `brain.py` does **not** yet call it (production still uses v0.1 homeostasis text-modulation) |
+| Phase 2 | Done (integrated) | Attention modulation — body state shifts token probabilities. Wired into `stream_cortex.py`: `compute_logit_bias()` is called every spontaneous thought and passed to inference as `logit_bias`. Runs alongside the v0.1 homeostasis text-modulation (the two channels coexist) |
 | Phase 3 | Done (integrated) | Raw sensor window — LLM reasons from time-series data; wired into `brain.py` |
 | Phase 4 | Implemented, not integrated | Vector memory — state-dependent semantic retrieval. Module lives in `vector_memory.py` and is validated by `demo_vector_memory.py`, but the main runtime still uses `memory.py` (Redis) |
 | Phase 5 | Done (integrated) | Integration & lifecycle validation — StreamCortex + SensorWindow + ActionGate + MQTT/Redis |
 
-> Note: Phases 2 and 4 are **implemented and demo-verified**, but their modules are **not yet wired into the main runtime**. The running agent currently relies on the v0.1 homeostasis (text modulation) and Redis memory. Integration milestones are tracked in `docs/ROADMAP_v0.2.md`.
+> Note: Phase 4 is **implemented and demo-verified**, but its module is **not yet wired into the main runtime** — the running agent currently uses `memory.py` (Redis). Phase 2 (attention modulation) is already wired into `stream_cortex.py` and runs alongside the v0.1 homeostasis text-modulation. Integration milestones are tracked in `docs/ROADMAP_v0.2.md`.
 
 ### Future Directions
 

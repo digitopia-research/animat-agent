@@ -1,6 +1,6 @@
 [project]
 name = "animat-agent"
-version = "0.1.0"
+version = "0.2.0"
 description = "The agent that lives — An LLM-based embodied artificial organism framework"
 readme = "README.md"
 requires-python = ">=3.11"

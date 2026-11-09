@@ -4,7 +4,7 @@
 >
 > 对下文理论的几处实现层面修正：
 > - **Phase 1（持续意识流）已集成。** 意识推理层不再是“仅触发式”，v0.2 中它作为恒常意识流持续运行（`animat/stream_cortex.py`）。旧的 `animat/cortex.py` 已删除。
-> - **Phase 2（AttentionModulator）与 Phase 4（VectorMemoryStore）已完成为独立模块**（`animat/attention_modulator.py`、`animat/vector_memory.py`）并通过 demo 验证，但**尚未接入主运行时**。当前生产仍使用 v0.1 的稳态文本调制与 Redis 记忆（`animat/memory.py`）。
+> - **Phase 2（AttentionModulator）已接入主运行时**（`animat/attention_modulator.py`）：`stream_cortex.py` 每轮自发思维都计算 logit bias 并传入推理，与 v0.1 的稳态文本调制的两条通道并存。**Phase 4（VectorMemoryStore）已完成为独立模块**（`animat/vector_memory.py`）并通过 demo 验证，但**尚未接入主运行时**，当前生产仍使用 Redis 记忆（`animat/memory.py`）。
 > - 实际部署采用 **EMQX** 作为 MQTT Broker（WebSocket 端口 8083），Redis 作为记忆存储。
 
 ```text

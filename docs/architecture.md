@@ -9,10 +9,12 @@
 > - **Phase 1 (Perpetual Stream of Consciousness) is integrated.** The conscious reasoning layer
 >   is no longer only *triggered*; in v0.2 it runs as a perpetual stream (`animat/stream_cortex.py`).
 >   The legacy `animat/cortex.py` has been removed.
-> - **Phases 2 (AttentionModulator) and 4 (VectorMemoryStore) are implemented as standalone modules
->   (`animat/attention_modulator.py`, `animat/vector_memory.py`) and demo-verified, but are NOT yet
->   wired into the main runtime.** Production still uses the v0.1 homeostasis text-modulation and
->   Redis memory (`animat/memory.py`).
+> - **Phase 2 (AttentionModulator) is wired into the main runtime.** `stream_cortex.py` computes the
+>   logit bias on every spontaneous thought and passes it into inference, running alongside the v0.1
+>   homeostasis text-modulation (the two channels coexist).
+> - **Phase 4 (VectorMemoryStore) is implemented as a standalone module (`animat/vector_memory.py`)
+>   and demo-verified, but is NOT yet wired into the main runtime.** Production memory still uses
+>   Redis (`animat/memory.py`).
 > - The actual deployment uses **EMQX** as the MQTT broker (WebSocket on 8083) and Redis for memory.
 
 ```text
